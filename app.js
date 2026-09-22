@@ -41,6 +41,13 @@
     hasEarlier: false,
     loadingEarlier: false,
 
+    // History paging (official /api/sessions/{id}/messages)
+    // Offset of the oldest row currently held in `messages`, and whether the
+    // server reported more rows beyond it. Drives [Load earlier] in BOTH modes.
+    historyOffset: 0,
+    historyHasMore: false,
+    historyLoading: false,
+
     connected: false,
     sending: false,
     lastError: null,
@@ -475,16 +482,23 @@
     var ctrl = new AbortController();
     var tid = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
 
+    // Push the assistant bubble up front so deltas can paint into it as they
+    // arrive (Kindle e-ink: showing partial text beats a blank page).
+    var assistantMsg = { role: 'assistant', content: '', tools: [] };
+    state.messages.push(assistantMsg);
+    renderMessages();
+
     var body = {
       model: 'hermes-agent',
       input: text,
       store: true,
+      stream: true,
       instructions: DEFAULT_INST
     };
     // Use conversation name = session ID for server-side response chaining
     body.conversation = session.id;
 
-    console.log('[hermes] Blocking POST /v1/responses, conversation:', session.id);
+    console.log('[hermes] Streaming POST /v1/responses, conversation:', session.id);
     fetch(state.serverUrl + '/v1/responses', {
       method: 'POST',
       headers: headers(false), // no session header — responses uses conversation param
@@ -498,22 +512,27 @@
             throw new Error('HTTP ' + r.status + ': ' + (t.substring(0, 200) || 'error'));
           });
         }
-        return r.json();
-      })
-      .then(function (data) {
-        var msg = parseResponseData(data);
-        state.messages.push(msg);
-
-        if (data.id) {
-          state.latestResponseId = data.id;
-          // previous_response_id tells us if there's earlier history
-          if (data.previous_response_id && !state.earliestResponseId) {
-            state.earliestResponseId = data.previous_response_id;
-          }
-          touchSession(session.id, msg.content, data.id);
+        var ct = (r.headers && r.headers.get) ? (r.headers.get('Content-Type') || '') : '';
+        if (ct.indexOf('text/event-stream') !== -1 && r.body && r.body.getReader) {
+          return pumpResponsesStream(r, assistantMsg, session);
         }
-
-        // Check if we need "load earlier" based on turn count
+        // Fallback for builds that ignore stream:true and return plain JSON.
+        return r.json().then(function (data) {
+          var msg = parseResponseData(data);
+          assistantMsg.content = msg.content;
+          assistantMsg.tools = msg.tools;
+          if (data.id) {
+            state.latestResponseId = data.id;
+            if (data.previous_response_id && !state.earliestResponseId) {
+              state.earliestResponseId = data.previous_response_id;
+            }
+            touchSession(session.id, assistantMsg.content, data.id);
+          }
+        });
+      })
+      .then(function () {
+        if (assistantMsg.content) touchSession(session.id, assistantMsg.content, state.latestResponseId);
+        saveMeta();
         updateHasEarlier();
         renderMessages();
       })
@@ -521,30 +540,224 @@
         var errMsg = err.message || String(err);
         console.error('[hermes] Responses error:', errMsg);
         state.lastError = errMsg;
-        state.messages.push({ role: 'error', content: errMsg, tools: [] });
+        // Reuse the placeholder bubble instead of leaving a blank one behind.
+        if (!assistantMsg.content && assistantMsg.tools.length === 0) {
+          assistantMsg.role = 'error';
+          assistantMsg.content = errMsg;
+        } else {
+          state.messages.push({ role: 'error', content: errMsg, tools: [] });
+        }
         renderMessages();
       })
       .finally(function () {
         state.sending = false;
         showTyping(false);
         updateInputState();
+        removeCursor();
       });
   }
 
-  // ─── RESPONSES MODE: HISTORY PAGING ──────────────────────────────────────────
-  function updateHasEarlier() {
-    var session = findSession(state.activeSession);
-    if (!session || session.mode === 'streaming') {
-      state.hasEarlier = false;
-    } else {
-      // Show load-earlier if server has older responses OR we've hit maxTurns
-      var turnPairs = Math.floor(state.messages.length / 2);
-      state.hasEarlier = !!state.earliestResponseId && (turnPairs >= state.maxTurns);
+  // ─── RESPONSES MODE: SSE CONSUMER ────────────────────────────────────────────
+  // Consumes the spec-compliant SSE that api_server emits for stream:true
+  // (gateway/platforms/api_server.py `_write_sse_responses`). Event types:
+  //   response.created                 — envelope, carries the response id
+  //   response.output_item.added       — item.type ∈ function_call |
+  //                                      function_call_output | message
+  //   response.output_item.done        — finalized item (carries arguments)
+  //   response.output_text.delta       — streamed assistant text
+  //   response.output_text.done        — authoritative full text for the item
+  //   response.completed               — terminal envelope w/ output + usage
+  //   response.failed                  — terminal error
+  function pumpResponsesStream(response, msg, session) {
+    var reader = response.body.getReader();
+    var decoder = new TextDecoder();
+    var buf = '';
+
+    function handleEvent(evtName, payload) {
+      if (!payload) return;
+      var d;
+      try { d = JSON.parse(payload); } catch (e) { return; } // partial block
+      var type = d.type || evtName;
+
+      if (type === 'response.output_text.delta') {
+        if (typeof d.delta === 'string') msg.content += d.delta;
+        updateLastMessage(msg);
+      } else if (type === 'response.output_text.done') {
+        if (typeof d.text === 'string') msg.content = d.text;
+        updateLastMessage(msg);
+      } else if (type === 'response.output_item.added') {
+        var item = d.item || {};
+        if (item.type === 'function_call') {
+          var args = '';
+          try {
+            var p = JSON.parse(item.arguments || '{}');
+            var k = Object.keys(p);
+            if (k.length > 0) args = String(p[k[0]]).substring(0, 60);
+          } catch (e2) { args = (item.arguments || '').substring(0, 60); }
+          msg.tools.push({
+            name: item.name || 'tool', icon: '[*]', args: args,
+            isComplete: false, callId: item.call_id || ''
+          });
+          updateTypingTool(item.name || 'tool');
+          updateLastMessage(msg);
+        } else if (item.type === 'function_call_output') {
+          attachToolOutput(msg, item.call_id, item.output);
+          updateLastMessage(msg);
+        }
+      } else if (type === 'response.output_item.done') {
+        var it = d.item || {};
+        if (it.type === 'function_call') {
+          for (var t = 0; t < msg.tools.length; t++) {
+            if (msg.tools[t].callId && msg.tools[t].callId === it.call_id) {
+              msg.tools[t].isComplete = true;
+              break;
+            }
+          }
+          updateLastMessage(msg);
+        }
+      } else if (type === 'response.completed') {
+        var resp = d.response || {};
+        if (resp.id) {
+          state.latestResponseId = resp.id;
+          if (resp.previous_response_id && !state.earliestResponseId) {
+            state.earliestResponseId = resp.previous_response_id;
+          }
+        }
+        // Safety net: if no deltas painted (or text was tool-only), take the
+        // terminal envelope's output as the source of truth.
+        if (!msg.content && resp.output) {
+          var parsed = parseResponseData(resp);
+          msg.content = parsed.content;
+          if (parsed.tools.length) msg.tools = parsed.tools;
+        }
+      } else if (type === 'response.failed') {
+        var fr = d.response || {};
+        throw new Error((fr.error && fr.error.message) || 'response failed');
+      }
     }
+
+    function parseBlock(block) {
+      var lines = block.split('\n');
+      var name = '';
+      var dataLines = [];
+      for (var i = 0; i < lines.length; i++) {
+        var ln = lines[i];
+        if (ln.indexOf('event:') === 0) name = ln.substring(6).trim();
+        else if (ln.indexOf('data:') === 0) dataLines.push(ln.substring(5).trim());
+      }
+      if (dataLines.length) handleEvent(name, dataLines.join('\n'));
+    }
+
+    function read() {
+      return reader.read().then(function (result) {
+        if (result.done) {
+          if (buf.trim()) parseBlock(buf);
+          return;
+        }
+        buf += decoder.decode(result.value, { stream: true });
+        // SSE events are separated by a blank line — split on \n\n and keep
+        // the trailing partial block in the buffer.
+        var blocks = buf.split('\n\n');
+        buf = blocks.pop() || '';
+        for (var i = 0; i < blocks.length; i++) parseBlock(blocks[i]);
+        return read();
+      });
+    }
+
+    return read();
+  }
+
+  // ─── TOOL OUTPUT ATTACHMENT ──────────────────────────────────────────────────
+  // Both the chat-completions path and the responses SSE path need to bind a
+  // tool result to the badge that requested it. Rows/calls are linked by
+  // call_id; an orphan (call outside our window) gets a synthesized badge so
+  // output is never silently dropped.
+  function attachToolOutput(msg, callId, output) {
+    var out = (output || '').substring(0, 200);
+    var found = -1;
+    for (var i = msg.tools.length - 1; i >= 0; i--) {
+      if (msg.tools[i].callId && msg.tools[i].callId === callId) { found = i; break; }
+    }
+    if (found >= 0) {
+      msg.tools[found].output = out;
+      msg.tools[found].isComplete = true;
+    } else if (callId) {
+      msg.tools.push({
+        name: 'tool', icon: '[>]', args: '', output: out,
+        isComplete: true, callId: callId
+      });
+    }
+    return msg;
+  }
+
+  // ─── HISTORY PAGING (both modes) ─────────────────────────────────────────────
+  // `hasEarlier` means "the server has older rows we haven't loaded". It is
+  // driven by `historyHasMore` (from the pagination block on the messages
+  // endpoint), NOT by turn count — the old turn-count version silently produced
+  // `false` in streaming mode, which is the default, so [Load earlier] never
+  // appeared and past the last maxTurns*2 messages a session was unviewable.
+  function updateHasEarlier() {
+    state.hasEarlier = !!state.historyHasMore;
     updateLoadEarlierUI();
   }
 
+  // Fetch one page of older rows for the active session and prepend them.
+  // Pages backwards from the oldest row we currently hold.
+  function loadEarlierHistory() {
+    var id = state.activeSession;
+    if (!id || state.historyLoading || !state.historyHasMore) return;
+    state.historyLoading = true;
+    E['load-earlier-btn'].textContent = '[Loading...]';
+
+    var pageSize = 100;
+    var url = state.serverUrl + '/api/sessions/' + id + '/messages'
+            + '?limit=' + pageSize + '&order=latest&offset=' + state.historyOffset;
+
+    fetch(url, { headers: headers(false) })
+      .then(function (r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var rows = data.data || [];
+        var pg = data.pagination || {};
+        var older = mergeRowsToMessages(rows);
+        if (older.length) {
+          state.messages = older.concat(state.messages);
+        }
+        // Advance the offset by what the server actually returned.
+        state.historyOffset += rows.length;
+        // NOTE: the messages endpoint's `pagination` block carries only
+        // {limit, offset, order, returned} — it does NOT report `has_more`
+        // (that field exists on the sessions LIST handler, not this one).
+        // So infer it: a full page means more may follow.
+        state.historyHasMore = rows.length >= pageSize;
+        saveMeta();
+        updateHasEarlier();
+        renderMessages();
+      })
+      .catch(function (err) {
+        E['load-earlier-btn'].textContent = '[ERR: ' + (err.message || 'Failed') + ']';
+        setTimeout(function () { E['load-earlier-btn'].textContent = '[Load earlier messages...]'; }, 2000);
+        return;
+      })
+      .finally(function () {
+        state.historyLoading = false;
+        E['load-earlier-btn'].textContent = '[Load earlier messages...]';
+      });
+  }
+
+  // Dispatch: streaming-mode sessions page through the history endpoint;
+  // responses-mode sessions page through the responses chain.
   function loadEarlier() {
+    var session = findSession(state.activeSession);
+    if (session && session.mode === 'responses' && state.earliestResponseId) {
+      return loadEarlierResponses();
+    }
+    return loadEarlierHistory();
+  }
+
+  function loadEarlierResponses() {
     if (state.loadingEarlier || !state.earliestResponseId) return;
     state.loadingEarlier = true;
     E['load-earlier-btn'].textContent = '[Loading...]';
@@ -558,6 +771,7 @@
         var msgs = responseToMessages(data);
         state.messages = msgs.concat(state.messages);
         state.earliestResponseId = data.previous_response_id || null;
+        state.historyHasMore = !!state.earliestResponseId;
         updateHasEarlier();
         renderMessages();
       })
@@ -587,6 +801,8 @@
         state.messages = responseToMessages(data);
         state.latestResponseId = data.id;
         state.earliestResponseId = data.previous_response_id || null;
+        // Responses mode pages via the response chain, not history offset.
+        state.historyHasMore = !!state.earliestResponseId;
         updateHasEarlier();
         renderMessages();
       })
@@ -815,15 +1031,19 @@
       return;
     }
 
-    // Streaming mode: only render the last maxTurns * 2 messages for perf
+    // Kindle perf guard: render only the newest window, but say so HONESTLY.
+    // Older rows are still in state.messages and reachable via [Load earlier]
+    // (which pages the history endpoint) — they are NOT "stored locally".
     var msgs = state.messages;
     var session = findSession(state.activeSession);
-    if (session && session.mode === 'streaming' && msgs.length > state.maxTurns * 2) {
-      // Show a "... N older messages ..." note at top
-      msgs = msgs.slice(-(state.maxTurns * 2));
+    var window = state.maxTurns * 2;
+    if (msgs.length > window) {
+      var hidden = msgs.length - window;
+      msgs = msgs.slice(-window);
       var note = document.createElement('div');
       note.className = 'load-earlier-note';
-      note.textContent = '[... older messages not shown — scroll stored locally ...]';
+      note.textContent = '[... ' + hidden + ' older message'
+        + (hidden === 1 ? '' : 's') + ' — use [Load earlier] ...]';
       E['messages'].appendChild(note);
     }
 
@@ -1035,41 +1255,127 @@
     state.earliestResponseId = null;
     state.hasEarlier = false;
     state.lastError = null;
+    // Reset history paging for the newly opened session.
+    state.historyOffset = 0;
+    state.historyHasMore = false;
+    state.historyLoading = false;
+    updateLoadEarlierUI();
 
     E['session-title'].textContent = id;
     E['chat-mode-badge'].textContent = session.mode === 'streaming' ? '\u25CE' : '\u2630';
     showView('chat');
     updateLoadEarlierUI();
 
-    if (session.mode === 'streaming') {
-      // Load from localStorage, then refresh history from the server
-      // (official endpoint; fills gaps for sessions started on other devices)
-      state.messages = loadMessages(id);
-      renderMessages();
-      loadSessionHistory(id);
-    } else {
-      // Load from server via Responses API
-      loadLatestForSession(session);
-    }
+    // History is loaded from the official endpoint in BOTH modes — it is the
+    // authoritative view of a session regardless of how it was created. The
+    // responses chain is only a continuation mechanism (it lets RESP mode
+    // append to a conversation), not a history source: relying on it meant a
+    // session created anywhere else (Discord, CLI, cron) rendered EMPTY in
+    // responses mode, because lastResponseId only exists for sessions this
+    // device sent via RESP.
+    state.messages = session.mode === 'streaming' ? loadMessages(id) : [];
+    renderMessages();
+    loadSessionHistory(id);
 
     E['message-input'].focus();
   }
 
+  // Build a readable turn list from raw message rows, merging tool rows into
+  // the assistant message that called them. Shared by the initial history
+  // fetch and by [Load earlier] paging, so both produce identical shapes.
+  //
+  // Two row quirks the official API exhibits, both handled here:
+  //  1. An assistant turn is split across MULTIPLE consecutive assistant rows
+  //     (text row, then tool-call rows). Emitting each as its own message made
+  //     a single turn look like a pile of `[*] tool` blocks with no prose.
+  //  2. User rows occasionally carry empty content (attachments, markers).
+  //     Rendering nothing made the opening turn an invisible blank box.
+  function mergeRowsToMessages(rows) {
+    var msgs = [];
+    var cur = null; // assistant message currently being accumulated
+
+    function flush() {
+      if (cur && (cur.content || cur.tools.length)) msgs.push(cur);
+      cur = null;
+    }
+
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+
+      if (row.role === 'user') {
+        flush();
+        var uc = row.content || '';
+        if (!uc.trim()) {
+          // No text to show — surface the row rather than emitting a blank box.
+          var kind = row.display_kind ? String(row.display_kind) : '';
+          uc = kind ? '[' + kind + ']' : '[no text content]';
+        }
+        msgs.push({ role: 'user', content: uc, tools: [] });
+
+      } else if (row.role === 'assistant') {
+        // Consecutive assistant rows belong to the SAME turn — accumulate.
+        if (!cur) cur = { role: 'assistant', content: '', tools: [] };
+        if (row.content) {
+          cur.content += (cur.content ? '\n\n' : '') + row.content;
+        }
+        var tcs = row.tool_calls || [];
+        for (var t = 0; t < tcs.length; t++) {
+          var fn = (tcs[t] && tcs[t].function) || {};
+          var args = '';
+          try {
+            var p = JSON.parse(fn.arguments || '{}');
+            var k = Object.keys(p);
+            if (k.length > 0) args = String(p[k[0]]).substring(0, 60);
+          } catch (e) { args = (fn.arguments || '').substring(0, 60); }
+          cur.tools.push({
+            name: fn.name || row.tool_name || 'tool',
+            icon: '[*]', args: args, isComplete: true,
+            callId: tcs[t].id || tcs[t].call_id || ''
+          });
+        }
+
+      } else if (row.role === 'tool') {
+        var out = (row.content || '').substring(0, 200);
+        if (!cur) cur = { role: 'assistant', content: '', tools: [] };
+        var attached = false;
+        for (var j = 0; j < cur.tools.length; j++) {
+          if (cur.tools[j].callId && cur.tools[j].callId === row.tool_call_id) {
+            cur.tools[j].output = out;
+            attached = true;
+            break;
+          }
+        }
+        if (!attached) {
+          // Orphan output (the calling row fell outside our window) — keep it
+          // visible with a synthesized badge rather than dropping it.
+          cur.tools.push({
+            name: row.tool_name || 'tool', icon: '[>]', args: '',
+            output: out, isComplete: true, callId: row.tool_call_id || ''
+          });
+        }
+      }
+      // role:"error"/other rows are skipped — not part of a readable turn
+    }
+    flush();
+    return msgs;
+  }
+
   // ─── SESSION HISTORY (official /api/sessions/{id}/messages) ─────────────────
-  // Loads the last N turns of a session from the server and merges them with
-  // any locally stored messages (Kindle localStorage is volatile and capped —
-  // the server is the source of truth for anything older).
-  // Data shape (per official API):
-  //   { "object": "list", "session_id": "...", "data": [ { role, content,
-  //     tool_call_id, tool_calls, tool_name, timestamp, ... }, ... ] }
-  // role:"tool" rows carry tool_call_id — attach them to the preceding
-  // assistant message's matching tool_call instead of rendering standalone.
+  // Loads the newest page of a session from the server and merges it with any
+  // locally stored messages. The server is the source of truth; local storage
+  // is only an offline cache for sessions sent from this device.
+  //
+  // Paging: offset 0 == newest page (order=latest). Older rows are fetched by
+  // [Load earlier] via loadEarlierHistory(), which increments historyOffset.
   function loadSessionHistory(id, callback) {
     if (!state.serverUrl) { if (callback) callback(null); return; }
     var ctrl = new AbortController();
-    var tid = setTimeout(function () { ctrl.abort(); }, 12000);
+    // 12s is the Kindle budget. Keep it generous but bounded — a silent abort
+    // used to leave the view on "Loading..." with no explanation.
+    var tid = setTimeout(function () { ctrl.abort(); }, 20000);
+    var pageSize = 100;
 
-    fetch(state.serverUrl + '/api/sessions/' + id + '/messages?limit=100&order=latest', {
+    fetch(state.serverUrl + '/api/sessions/' + id + '/messages?limit=' + pageSize + '&order=latest', {
       headers: headers(false),
       signal: ctrl.signal
     })
@@ -1080,64 +1386,14 @@
       })
       .then(function (data) {
         var rows = data.data || [];
-        console.log('[hermes] History fetch: ' + rows.length + ' messages for ' + id);
-
-        // Build a chronological turn list, merging tool rows into assistant msgs.
-        var msgs = [];
-        var pending = null; // assistant message awaiting tool outputs
-        for (var i = 0; i < rows.length; i++) {
-          var row = rows[i];
-          if (row.role === 'user') {
-            if (pending) { if (pending.content || pending.tools.length) msgs.push(pending); pending = null; }
-            msgs.push({ role: 'user', content: row.content || '', tools: [] });
-          } else if (row.role === 'assistant') {
-            if (pending) { if (pending.content || pending.tools.length) msgs.push(pending); }
-            pending = { role: 'assistant', content: row.content || '', tools: [] };
-            // The official API embeds tool_calls on the assistant row:
-            // tool_calls: [ { function: { name, arguments } } ]
-            var tcs = row.tool_calls || [];
-            for (var t = 0; t < tcs.length; t++) {
-              var fn = (tcs[t] && tcs[t].function) || {};
-              var args = '';
-              try {
-                var p = JSON.parse(fn.arguments || '{}');
-                var k = Object.keys(p);
-                if (k.length > 0) args = String(p[k[0]]).substring(0, 60);
-              } catch (e) { args = (fn.arguments || '').substring(0, 60); }
-              pending.tools.push({
-                name: fn.name || row.tool_name || 'tool',
-                icon: '[*]', args: args, isComplete: true,
-                callId: tcs[t].id || tcs[t].call_id || ''
-              });
-            }
-          } else if (row.role === 'tool') {
-            // Tool output row — attach to the pending assistant message's call
-            var out = (row.content || '').substring(0, 200);
-            if (pending) {
-              var attached = false;
-              for (var j = 0; j < pending.tools.length; j++) {
-                if (pending.tools[j].callId && pending.tools[j].callId === row.tool_call_id) {
-                  pending.tools[j].output = out;
-                  attached = true;
-                  break;
-                }
-              }
-              if (!attached && row.tool_name) {
-                // Orphan output (call row not in our window) — synthesize a badge
-                pending.tools.push({ name: row.tool_name, icon: '[>]', args: '', output: out, isComplete: true, callId: row.tool_call_id || '' });
-              }
-            }
-          }
-          // role:"error"/other rows are skipped — not part of a readable turn
-        }
-        if (pending) { if (pending.content || pending.tools.length) msgs.push(pending); }
+        console.log('[hermes] History fetch: ' + rows.length + ' rows for ' + id);
+        var msgs = mergeRowsToMessages(rows);
 
         if (state.activeSession === id) {
           // Server history supersedes local: it covers gaps (turns that happened
           // on other devices) and is authoritative. Local messages not present in
-          // the server window (e.g. current in-flight turn) are preserved on top.
+          // the server window (e.g. the in-flight turn) are preserved on top.
           var localMsgs = state.messages || [];
-          // The last user message may be the just-sent one not yet on the server.
           var lastLocalUser = null;
           for (var m = localMsgs.length - 1; m >= 0; m--) {
             if (localMsgs[m].role === 'user') { lastLocalUser = localMsgs[m]; break; }
@@ -1148,13 +1404,16 @@
           }
           var tail = [];
           if (lastLocalUser && (!lastServerUser || lastLocalUser.content !== lastServerUser.content)) {
-            // in-flight or unsynced local tail: keep local messages from that point
             var idx = localMsgs.indexOf(lastLocalUser);
             if (idx >= 0) tail = localMsgs.slice(idx);
           }
           state.messages = msgs.concat(tail);
+          // Paging bookkeeping: offset 0 page is in hand; a full page implies
+          // the server may hold older rows.
+          state.historyOffset = rows.length;
+          state.historyHasMore = rows.length >= pageSize;
+          updateHasEarlier();
           renderMessages();
-          // Persist the merged view for offline re-open
           if (findSession(id) && findSession(id).mode === 'streaming') saveMessages(id, state.messages);
         }
         if (callback) callback(msgs);
@@ -1162,6 +1421,15 @@
       .catch(function (err) {
         clearTimeout(tid);
         console.warn('[hermes] History fetch failed:', err.message);
+        // Surface the failure instead of leaving a blank chat view.
+        if (state.activeSession === id && state.messages.length === 0) {
+          state.messages = [{
+            role: 'error',
+            content: 'Could not load session history (' + (err.message || 'failed') + ').',
+            tools: []
+          }];
+          renderMessages();
+        }
         if (callback) callback(null);
       });
   }

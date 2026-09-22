@@ -24,6 +24,24 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         print("  %s - %s" % (self.address_string(), format % args))
 
+    # Set True while proxying so end_headers() doesn't add our cache policy to
+    # a response whose cache semantics belong to the backend.
+    _proxied = False
+
+    def end_headers(self):
+        # Static assets MUST revalidate.
+        #
+        # Without this the server sends no Cache-Control at all, and a Kindle
+        # WebKit browser happily keeps a cached app.js indefinitely — so after
+        # every frontend update the device silently runs the OLD code (observed:
+        # a stale app.js kept the old render cap and never showed [Load
+        # earlier]). SimpleHTTPRequestHandler already emits Last-Modified, so
+        # `no-cache` means "revalidate every time": the browser sends
+        # If-Modified-Since and still gets a cheap 304 when nothing changed.
+        if not self._proxied:
+            self.send_header("Cache-Control", "no-cache, must-revalidate")
+        super().end_headers()
+
     def do_GET(self):
         if self.path.startswith(("/v1/", "/api/")) or self.path.startswith("/health"):
             self.proxy_request("GET")
@@ -39,6 +57,8 @@ class ProxyHandler(http.server.SimpleHTTPRequestHandler):
     def proxy_request(self, method):
         hermes_host = get_hermes_host()
         hermes_scheme = get_hermes_scheme()
+        # Backend owns cache semantics for proxied responses.
+        self._proxied = True
 
         # Normalize path: strip /v1 prefix duplication if any
         path = self.path
