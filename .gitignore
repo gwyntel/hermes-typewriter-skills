@@ -2,3 +2,6 @@
 .agents/*
 config/mcporter.json
 cloudflared
+typewriter_serve.log
+__pycache__/
+*.pyc

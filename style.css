@@ -586,14 +586,25 @@ label {
 .message--error .message-role { color: var(--ink); }
 
 /* --- TOOL INDICATORS --- */
+/* Tool badges sit BELOW the message as a footnote, in a single row that
+   SCROLLS SIDEWAYS (one glanceable line per turn, no vertical sprawl).
+   The hidden scrollbar keeps it clean on e-ink. */
+.tools-block {
+  margin-top: var(--sp-4);
+  padding-top: var(--sp-3);
+  border-top: 1px dashed var(--border-lt);
+}
 .tools-container {
   display: flex;
+  flex-wrap: nowrap;
   overflow-x: auto;
-  margin-bottom: var(--sp-4);
+  margin-bottom: var(--sp-3);
   scrollbar-width: none;
+  -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
 }
 .tools-container::-webkit-scrollbar { display: none; }
-.tools-container > * + * { margin-left: var(--sp-4); }
+.tools-container > * + * { margin-left: var(--sp-3); }
 
 .badge {
   font-size: var(--fs-sm);
@@ -850,14 +861,41 @@ tbody tr:last-child td {
   appearance: none;
   -webkit-appearance: none;
 }
+/* Expanded tool card: FULL args + FULL output, wrapped (never clipped). */
 .tool-detail {
   font-size: var(--fs-sm);
   color: var(--ink-mid);
+  border: 1px solid var(--border-lt);
+  background: var(--paper-dim);
+  padding: var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
+.tool-detail-head {
+  font-weight: bold;
+  color: var(--ink);
+  margin-bottom: var(--sp-2);
+}
+.tool-detail-head img.emoji {
+  height: 1em;
+  width: 1em;
+  vertical-align: middle;
+}
+.tool-detail-args,
+.tool-detail-time {
+  margin-bottom: var(--sp-2);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+.tool-detail-time { font-family: var(--font); }
+/* Untruncated tool output. pre-wrap + break-word so long lines fold instead
+   of forcing the page wide (Kindle has no horizontal scroll). */
+.tool-detail-out {
+  font-family: var(--font);
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-wrap: break-word;
+  margin: 0;
+  padding: var(--sp-2);
+  background: var(--paper);
   border: 1px solid var(--border-lt);
-  background: var(--paper-dim);
-  padding: var(--sp-2) var(--sp-3);
-  margin-bottom: var(--sp-4);
 }
