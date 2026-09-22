@@ -238,8 +238,8 @@
   }
 
   // === SERVER SESSIONS API ===
-  // Fetches recent sessions from the proxy server's /sessions endpoint
-  // This reads directly from the Hermes SQLite database (state.db)
+  // Fetches recent sessions via the official Hermes API (/api/sessions)
+  // Proxied through the typewriter proxy to the gateway's api_server.
   // Requires API key authentication (same as completions API)
   function fetchServerSessions(callback) {
     if (!state.serverUrl) {
@@ -248,9 +248,9 @@
     }
     var ctrl = new AbortController();
     var tid = setTimeout(function () { ctrl.abort(); }, 8000);
-    
-    // Use proxy /sessions endpoint - requires auth
-    fetch(state.serverUrl + '/sessions?limit=15', {
+
+    // Official Hermes endpoint (proxied): GET /api/sessions
+    fetch(state.serverUrl + '/api/sessions?limit=15', {
       headers: headers(), // Include Authorization header
       signal: ctrl.signal
     })
@@ -260,7 +260,7 @@
         return r.json();
       })
       .then(function (data) {
-        var serverSessions = data.sessions || [];
+        var serverSessions = data.data || []; // official shape: {object:"list", data:[...]}
         console.log('[hermes] Fetched ' + serverSessions.length + ' sessions from server');
         if (callback) callback(serverSessions);
       })
@@ -284,10 +284,11 @@
       
       // Handle timestamp: use started_at_iso (from our endpoint) or started_at (raw timestamp)
       var sessionTime = Date.now();
-      if (ss.started_at_iso) {
+      // Official /api/sessions shape: started_at is a unix timestamp (float)
+      if (ss.started_at) {
+        sessionTime = ss.started_at * 1000; // Unix timestamp (seconds) to ms
+      } else if (ss.started_at_iso) {
         sessionTime = new Date(ss.started_at_iso).getTime();
-      } else if (ss.started_at) {
-        sessionTime = ss.started_at * 1000; // Unix timestamp to ms
       }
       
       sessions.push({
@@ -1041,15 +1042,128 @@
     updateLoadEarlierUI();
 
     if (session.mode === 'streaming') {
-      // Load from localStorage
+      // Load from localStorage, then refresh history from the server
+      // (official endpoint; fills gaps for sessions started on other devices)
       state.messages = loadMessages(id);
       renderMessages();
+      loadSessionHistory(id);
     } else {
       // Load from server via Responses API
       loadLatestForSession(session);
     }
 
     E['message-input'].focus();
+  }
+
+  // ─── SESSION HISTORY (official /api/sessions/{id}/messages) ─────────────────
+  // Loads the last N turns of a session from the server and merges them with
+  // any locally stored messages (Kindle localStorage is volatile and capped —
+  // the server is the source of truth for anything older).
+  // Data shape (per official API):
+  //   { "object": "list", "session_id": "...", "data": [ { role, content,
+  //     tool_call_id, tool_calls, tool_name, timestamp, ... }, ... ] }
+  // role:"tool" rows carry tool_call_id — attach them to the preceding
+  // assistant message's matching tool_call instead of rendering standalone.
+  function loadSessionHistory(id, callback) {
+    if (!state.serverUrl) { if (callback) callback(null); return; }
+    var ctrl = new AbortController();
+    var tid = setTimeout(function () { ctrl.abort(); }, 12000);
+
+    fetch(state.serverUrl + '/api/sessions/' + id + '/messages?limit=100&order=latest', {
+      headers: headers(false),
+      signal: ctrl.signal
+    })
+      .then(function (r) {
+        clearTimeout(tid);
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
+      .then(function (data) {
+        var rows = data.data || [];
+        console.log('[hermes] History fetch: ' + rows.length + ' messages for ' + id);
+
+        // Build a chronological turn list, merging tool rows into assistant msgs.
+        var msgs = [];
+        var pending = null; // assistant message awaiting tool outputs
+        for (var i = 0; i < rows.length; i++) {
+          var row = rows[i];
+          if (row.role === 'user') {
+            if (pending) { if (pending.content || pending.tools.length) msgs.push(pending); pending = null; }
+            msgs.push({ role: 'user', content: row.content || '', tools: [] });
+          } else if (row.role === 'assistant') {
+            if (pending) { if (pending.content || pending.tools.length) msgs.push(pending); }
+            pending = { role: 'assistant', content: row.content || '', tools: [] };
+            // The official API embeds tool_calls on the assistant row:
+            // tool_calls: [ { function: { name, arguments } } ]
+            var tcs = row.tool_calls || [];
+            for (var t = 0; t < tcs.length; t++) {
+              var fn = (tcs[t] && tcs[t].function) || {};
+              var args = '';
+              try {
+                var p = JSON.parse(fn.arguments || '{}');
+                var k = Object.keys(p);
+                if (k.length > 0) args = String(p[k[0]]).substring(0, 60);
+              } catch (e) { args = (fn.arguments || '').substring(0, 60); }
+              pending.tools.push({
+                name: fn.name || row.tool_name || 'tool',
+                icon: '[*]', args: args, isComplete: true,
+                callId: tcs[t].id || tcs[t].call_id || ''
+              });
+            }
+          } else if (row.role === 'tool') {
+            // Tool output row — attach to the pending assistant message's call
+            var out = (row.content || '').substring(0, 200);
+            if (pending) {
+              var attached = false;
+              for (var j = 0; j < pending.tools.length; j++) {
+                if (pending.tools[j].callId && pending.tools[j].callId === row.tool_call_id) {
+                  pending.tools[j].output = out;
+                  attached = true;
+                  break;
+                }
+              }
+              if (!attached && row.tool_name) {
+                // Orphan output (call row not in our window) — synthesize a badge
+                pending.tools.push({ name: row.tool_name, icon: '[>]', args: '', output: out, isComplete: true, callId: row.tool_call_id || '' });
+              }
+            }
+          }
+          // role:"error"/other rows are skipped — not part of a readable turn
+        }
+        if (pending) { if (pending.content || pending.tools.length) msgs.push(pending); }
+
+        if (state.activeSession === id) {
+          // Server history supersedes local: it covers gaps (turns that happened
+          // on other devices) and is authoritative. Local messages not present in
+          // the server window (e.g. current in-flight turn) are preserved on top.
+          var localMsgs = state.messages || [];
+          // The last user message may be the just-sent one not yet on the server.
+          var lastLocalUser = null;
+          for (var m = localMsgs.length - 1; m >= 0; m--) {
+            if (localMsgs[m].role === 'user') { lastLocalUser = localMsgs[m]; break; }
+          }
+          var lastServerUser = null;
+          for (var s2 = msgs.length - 1; s2 >= 0; s2--) {
+            if (msgs[s2].role === 'user') { lastServerUser = msgs[s2]; break; }
+          }
+          var tail = [];
+          if (lastLocalUser && (!lastServerUser || lastLocalUser.content !== lastServerUser.content)) {
+            // in-flight or unsynced local tail: keep local messages from that point
+            var idx = localMsgs.indexOf(lastLocalUser);
+            if (idx >= 0) tail = localMsgs.slice(idx);
+          }
+          state.messages = msgs.concat(tail);
+          renderMessages();
+          // Persist the merged view for offline re-open
+          if (findSession(id) && findSession(id).mode === 'streaming') saveMessages(id, state.messages);
+        }
+        if (callback) callback(msgs);
+      })
+      .catch(function (err) {
+        clearTimeout(tid);
+        console.warn('[hermes] History fetch failed:', err.message);
+        if (callback) callback(null);
+      });
   }
 
   // === FORM VALIDATION HELPERS ===
