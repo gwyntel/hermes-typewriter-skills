@@ -990,8 +990,8 @@
   // Per-tool emoji, mirroring the server's tools/registry emoji fields. The
   // LIVE streaming path gets a real glyph in `d.emoji`, but the /api/sessions
   // history path carries only `tool_name` — without this map every historical
-  // badge would collapse to one generic bolt. Regenerate from the server with
-  // scripts/collect_tool_emojis.sh when tools are added.
+  // badge would collapse to one generic bolt. Regenerate with:
+  //   ~/.hermes/skills/productivity/kindle-frontend-pipeline/scripts/collect_tool_emojis.py
   var TOOL_EMOJI = {
     "annotate_preview": "\uD83D\uDD16",
     "apply_layout": "\uD83E\uDDF1",
