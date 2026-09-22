@@ -5,7 +5,8 @@
   var CFG = window.HERMES_CONFIG || {};
   var DEFAULT_URL = CFG.serverUrl || window.location.origin;
   var DEFAULT_KEY = CFG.apiKey || '';
-  var DEFAULT_MODE = CFG.mode || 'streaming';   // 'streaming' | 'responses'
+  // Responses is the ONLY transport (completions mode was removed).
+  var DEFAULT_MODE = 'responses';
   var DEFAULT_TURNS = CFG.maxTurns || 8;
   var DEFAULT_INST = CFG.instructions || '';
   var TIMEOUT_MS = 900000; // 15 min (inference is slow)
@@ -28,7 +29,7 @@
   var state = {
     serverUrl: DEFAULT_URL,
     apiKey: DEFAULT_KEY,
-    mode: DEFAULT_MODE,    // 'streaming' | 'responses'
+    mode: DEFAULT_MODE,    // always 'responses' now (kept for stored-session shape)
     maxTurns: DEFAULT_TURNS,
 
     sessions: [],       // [{id, mode, preview, time, lastResponseId?, messageCount?}]
@@ -51,7 +52,14 @@
     connected: false,
     sending: false,
     lastError: null,
-    dark: false
+    dark: false,
+
+    // In-flight request control (STOP button)
+    activeCtrl: null,
+    userAborted: false,
+
+    // Token usage totals per session: {sessionId: totalTokens}
+    usage: {}
   };
 
   // === DOM CACHE ===
@@ -67,13 +75,13 @@
       'rejoin-input', 'rejoin-error', 'rejoin-btn',
       'settings-toggle', 'settings-panel',
       'setting-url', 'setting-key',
-      'setting-mode-streaming', 'setting-mode-responses',
       'setting-max-turns', 'setting-dark-mode', 'mode-hint',
       'test-connection-btn', 'settings-save',
       'back-btn', 'session-title', 'chat-mode-badge',
       'load-earlier', 'load-earlier-btn',
       'messages', 'typing-indicator',
-      'message-input', 'send-btn'
+      'message-input', 'send-btn', 'stop-btn',
+      'usage-total'
     ];
     for (var i = 0; i < ids.length; i++) {
       E[ids[i]] = document.getElementById(ids[i]);
@@ -82,7 +90,19 @@
 
   // === PERSISTENCE ===
   var LS_META_KEY = 'hermes_tw_sessions_v2';  // only session metadata
-  var LS_MSG_PREFIX = 'hermes_tw_msgs_';      // streaming mode message arrays
+  var LS_MSG_PREFIX = 'hermes_tw_msgs_';      // legacy completions-mode arrays (unused)
+  var LS_USAGE_KEY = 'hermes_tw_usage_v1';     // per-session token totals
+
+  /** Token totals per session: {sessionId: totalTokens}. Spend visibility
+      without spending tokens — the values come from server usage envelopes. */
+  function loadUsage() {
+    try { return JSON.parse(localStorage.getItem(LS_USAGE_KEY) || '{}') || {}; }
+    catch (e) { return {}; }
+  }
+  function saveUsage() {
+    try { localStorage.setItem(LS_USAGE_KEY, JSON.stringify(state.usage)); }
+    catch (e) { /* silent */ }
+  }
 
   function saveMeta() {
     try {
@@ -97,35 +117,13 @@
     } catch (e) { /* silent fail on Kindle */ }
   }
 
-  /** Streaming mode: persist messages for a session */
-  function saveMessages(sessionId, messages) {
-    try {
-      // Cap stored messages to maxTurns * 2 to respect Kindle storage limits
-      var cap = state.maxTurns * 4; // generous buffer
-      var store = messages.slice(-cap);
-      localStorage.setItem(LS_MSG_PREFIX + sessionId, JSON.stringify(store));
-    } catch (e) { /* silent */ }
-  }
-
-  /** Streaming mode: load persisted messages for a session */
-  function loadMessages(sessionId) {
-    try {
-      return JSON.parse(localStorage.getItem(LS_MSG_PREFIX + sessionId) || 'null') || [];
-    } catch (e) { return []; }
-  }
-
-  /** Responses mode: remove any stored messages for a session (not needed) */
-  function clearMessages(sessionId) {
-    try { localStorage.removeItem(LS_MSG_PREFIX + sessionId); } catch (e) { }
-  }
-
   function loadMeta() {
     try {
       var d = JSON.parse(localStorage.getItem(LS_META_KEY) || 'null');
       if (d) {
         state.serverUrl = d.serverUrl || DEFAULT_URL;
         state.apiKey = d.apiKey || '';
-        state.mode = d.mode || DEFAULT_MODE;
+        state.mode = 'responses';  // single transport
         state.maxTurns = d.maxTurns || DEFAULT_TURNS;
         state.dark = !!d.dark;
         // Sessions loaded from server, not localStorage
@@ -239,7 +237,8 @@
   }
 
   function deleteSession(id) {
-    clearMessages(id);
+    // Purge any legacy completions-mode blob left on the device.
+    try { localStorage.removeItem(LS_MSG_PREFIX + id); } catch (e) { /* silent */ }
     state.sessions = state.sessions.filter(function (s) { return s.id !== id; });
     saveMeta();
   }
@@ -323,6 +322,43 @@
     return h;
   }
 
+  // === TOKEN USAGE ===
+  // Compact "1.2k" formatting for e-ink status lines.
+  function formatTokens(n) {
+    if (n == null || isNaN(n)) return '0';
+    n = Math.round(n);
+    if (n >= 1000) {
+      var k = n / 1000;
+      return (k >= 100 ? String(Math.round(k)) : String(Math.round(k * 10) / 10)) + 'k';
+    }
+    return String(n);
+  }
+
+  // Normalize the two usage shapes backends emit:
+  // OpenAI-style {input_tokens, output_tokens, total_tokens} and
+  // chat-completions-style {prompt_tokens, completion_tokens, total_tokens}.
+  function normalizeUsage(u) {
+    if (!u) return null;
+    var inp = u.input_tokens != null ? u.input_tokens : u.prompt_tokens;
+    var out = u.output_tokens != null ? u.output_tokens : u.completion_tokens;
+    var tot = u.total_tokens != null ? u.total_tokens : ((inp || 0) + (out || 0));
+    return { input: inp || 0, output: out || 0, total: tot || 0 };
+  }
+
+  // Fold a finished turn's usage into the session total and repaint the header.
+  function recordUsage(sessionId, msg) {
+    if (!sessionId || !msg || !msg.usage) return;
+    state.usage[sessionId] = (state.usage[sessionId] || 0) + (msg.usage.total || 0);
+    saveUsage();
+    renderUsageTotal();
+  }
+
+  function renderUsageTotal() {
+    if (!E['usage-total']) return;
+    var t = state.activeSession ? (state.usage[state.activeSession] || 0) : 0;
+    E['usage-total'].textContent = t > 0 ? '∑ ' + formatTokens(t) : '';
+  }
+
   // === HEALTH CHECK ===
   function checkHealth(manual) {
     if (manual) E['test-connection-btn'].textContent = '[...]';
@@ -353,6 +389,7 @@
   function sendMessage(text) {
     if (state.sending || !text.trim()) return;
     state.sending = true;
+    state.userAborted = false;
     updateInputState();
 
     var userMsg = { role: 'user', content: text, tools: [] };
@@ -362,124 +399,22 @@
     var session = findSession(state.activeSession);
     if (!session) return;
 
-    if (session.mode === 'streaming') {
-      doStreaming(text, session);
-    } else {
-      doResponses(text, session);
-    }
+    doResponses(text, session);
   }
 
-  // ─── STREAMING MODE ─────────────────────────────────────────────────────────
-  function doStreaming(text, session) {
-    var ctrl = new AbortController();
-    var tid = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
-    var assistantMsg = { role: 'assistant', content: '', tools: [] };
-    state.messages.push(assistantMsg);
-    showTyping(true);  // Show typing indicator during streaming
-    renderMessages();
-
-    var body = {
-      model: 'hermes-agent',
-      messages: [{ role: 'user', content: text }],
-      stream: true
-    };
-
-    console.log('[hermes] Streaming POST /v1/chat/completions, session:', session.id);
-    fetch(state.serverUrl + '/v1/chat/completions', {
-      method: 'POST',
-      headers: headers(true), // include X-Hermes-Session-Id
-      body: JSON.stringify(body),
-      signal: ctrl.signal
-    })
-      .then(function (r) {
-        clearTimeout(tid);
-        if (!r.ok) {
-          return r.text().then(function (t) {
-            throw new Error('HTTP ' + r.status + ': ' + (t.substring(0, 200) || 'error'));
-          });
-        }
-        return pumpChatStream(r, assistantMsg);
-      })
-      .then(function () {
-        // Persist messages to localStorage (streaming mode only)
-        saveMessages(session.id, state.messages);
-        touchSession(session.id, assistantMsg.content);
-        // Enforce maxTurns view (don't discard, just show notice)
-        enforceMaxTurns();
-        renderMessages();
-      })
-      .catch(function (err) {
-        var errMsg = err.message || String(err);
-        console.error('[hermes] Stream error:', errMsg);
-        state.lastError = errMsg;
-        state.messages.push({ role: 'error', content: errMsg, tools: [] });
-        renderMessages();
-      })
-      .finally(function () {
-        state.sending = false;
-        showTyping(false);
-        updateInputState();
-        removeCursor();
-      });
-  }
-
-  function pumpChatStream(response, msg) {
-    var reader = response.body.getReader();
-    var decoder = new TextDecoder();
-    var buf = '';
-
-    function read() {
-      return reader.read().then(function (result) {
-        if (result.done) {
-          if (buf.trim()) processChatSSE(buf.split('\n'), msg);
-          return;
-        }
-        buf += decoder.decode(result.value, { stream: true });
-        var lines = buf.split('\n');
-        buf = lines.pop() || '';
-        processChatSSE(lines, msg);
-        return read();
-      });
-    }
-    return read();
-  }
-
-  function processChatSSE(lines, msg) {
-    for (var i = 0; i < lines.length; i++) {
-      var line = lines[i].trim();
-      if (!line || line === 'data: [DONE]') continue;
-      if (line.indexOf('data:') !== 0) continue;
-      try {
-        var d = JSON.parse(line.substring(5).trim());
-        var delta = d.choices && d.choices[0] && d.choices[0].delta && d.choices[0].delta.content;
-        if (!delta) continue;
-
-        // Detect tool progress injected as `emoji label` by the server
-        // Format: \n`{emoji} {label}`\n
-        var toolMatch = delta.match(/\n?`([^`]+)`\s?\n?/);
-        if (toolMatch) {
-          var raw = toolMatch[1];
-          // Extract emoji (first unicode char) and label (rest after space)
-          // Twemoji will convert emoji to image when rendered
-          var parts = raw.split(/\s+/);
-          var icon = parts[0] || '[*]';  // Keep raw emoji - Twemoji handles it
-          var label = parts.slice(1).join(' ') || raw;
-          msg.tools.push({ name: label, icon: icon, isComplete: true });
-          console.log('[hermes] Tool indicator:', label);
-          // Update typing indicator to show tool name
-          updateTypingTool(label);
-        } else {
-          msg.content += delta;  // Keep raw emoji - Twemoji converts later
-        }
-        updateLastMessage(msg);
-      } catch (e) { /* partial chunk — ignore */ }
-    }
-  }
+  // ─── COMPLETIONS MODE: REMOVED ──────────────────────────────────────────────
+  // /v1/chat/completions support was gutted; the responses path is the only
+  // transport. Its tool events were the weaker of the two anyway: the SSE
+  // carried only {tool, toolCallId, status, emoji, label} with NO output and
+  // NO elapsed time, so every tool card needed a second history round-trip
+  // to be useful. /v1/responses emits real function_call_output items with
+  // the output inline, which is strictly better.
 
   // ─── RESPONSES MODE ──────────────────────────────────────────────────────────
   function doResponses(text, session) {
     showTyping(true);
     var ctrl = new AbortController();
+    state.activeCtrl = ctrl; // hoisted so [STOP] can abort the in-flight request
     var tid = setTimeout(function () { ctrl.abort(); }, TIMEOUT_MS);
 
     // Push the assistant bubble up front so deltas can paint into it as they
@@ -521,6 +456,7 @@
           var msg = parseResponseData(data);
           assistantMsg.content = msg.content;
           assistantMsg.tools = msg.tools;
+          if (data.usage) assistantMsg.usage = normalizeUsage(data.usage);
           if (data.id) {
             state.latestResponseId = data.id;
             if (data.previous_response_id && !state.earliestResponseId) {
@@ -532,11 +468,21 @@
       })
       .then(function () {
         if (assistantMsg.content) touchSession(session.id, assistantMsg.content, state.latestResponseId);
+        recordUsage(session.id, assistantMsg);
         saveMeta();
         updateHasEarlier();
         renderMessages();
       })
       .catch(function (err) {
+        if (state.userAborted) {
+          // [STOP] pressed: keep the partial turn, skip the error bubble.
+          state.userAborted = false;
+          state.lastError = null;
+          if (assistantMsg.content) touchSession(session.id, assistantMsg.content, state.latestResponseId);
+          recordUsage(session.id, assistantMsg);
+          renderMessages();
+          return;
+        }
         var errMsg = err.message || String(err);
         console.error('[hermes] Responses error:', errMsg);
         state.lastError = errMsg;
@@ -550,6 +496,7 @@
         renderMessages();
       })
       .finally(function () {
+        state.activeCtrl = null;
         state.sending = false;
         showTyping(false);
         updateInputState();
@@ -592,16 +539,37 @@
           try {
             var p = JSON.parse(item.arguments || '{}');
             var k = Object.keys(p);
-            if (k.length > 0) args = String(p[k[0]]).substring(0, 60);
-          } catch (e2) { args = (item.arguments || '').substring(0, 60); }
+            if (k.length > 0) args = String(p[k[0]]);
+          } catch (e2) { args = (item.arguments || ''); }
           msg.tools.push({
-            name: item.name || 'tool', icon: '[*]', args: args,
-            isComplete: false, callId: item.call_id || ''
+            name: item.name || 'tool', icon: '\u26A1', args: args,
+            isComplete: false, callId: item.call_id || '', t0: Date.now()
           });
           updateTypingTool(item.name || 'tool');
           updateLastMessage(msg);
+        } else if (item.type === 'reasoning') {
+          // Forward-compatible: accumulate reasoning summaries if the backend
+          // ever emits them. Rendered collapsed under [THOUGHT].
+          var rtxt = '';
+          if (Array.isArray(item.summary)) {
+            for (var si = 0; si < item.summary.length; si++) {
+              var sp = item.summary[si];
+              rtxt += (typeof sp === 'string') ? sp : (sp.text || '');
+            }
+          } else if (typeof item.content === 'string') {
+            rtxt = item.content;
+          }
+          if (rtxt) {
+            msg.reasoning = (msg.reasoning || '') + rtxt;
+            updateLastMessage(msg);
+          }
         } else if (item.type === 'function_call_output') {
           attachToolOutput(msg, item.call_id, item.output);
+          updateLastMessage(msg);
+        }
+      } else if (type === 'response.reasoning_summary_text.delta') {
+        if (typeof d.delta === 'string' && d.delta) {
+          msg.reasoning = (msg.reasoning || '') + d.delta;
           updateLastMessage(msg);
         }
       } else if (type === 'response.output_item.done') {
@@ -610,6 +578,7 @@
           for (var t = 0; t < msg.tools.length; t++) {
             if (msg.tools[t].callId && msg.tools[t].callId === it.call_id) {
               msg.tools[t].isComplete = true;
+              msg.tools[t].elapsed = Date.now() - (msg.tools[t].t0 || Date.now());
               break;
             }
           }
@@ -623,6 +592,8 @@
             state.earliestResponseId = resp.previous_response_id;
           }
         }
+        // Token usage envelope — folded into the session total on completion.
+        if (resp.usage) msg.usage = normalizeUsage(resp.usage);
         // Safety net: if no deltas painted (or text was tool-only), take the
         // terminal envelope's output as the source of truth.
         if (!msg.content && resp.output) {
@@ -672,8 +643,33 @@
   // tool result to the badge that requested it. Rows/calls are linked by
   // call_id; an orphan (call outside our window) gets a synthesized badge so
   // output is never silently dropped.
+  // The Responses API's function_call_output carries `output` as a LIST of
+  // content parts — [{type:"input_text", text:"..."}] — not a string. Feeding
+  // that straight to textContent renders "[object Object]", which is exactly
+  // what the first live test showed. Flatten every shape to plain text.
+  function normalizeToolOutput(o) {
+    if (o == null) return '';
+    if (typeof o === 'string') return o;
+    if (Array.isArray(o)) {
+      var parts = [];
+      for (var i = 0; i < o.length; i++) {
+        var t = normalizeToolOutput(o[i]);
+        if (t) parts.push(t);
+      }
+      return parts.join('\n');
+    }
+    if (typeof o === 'object') {
+      if (typeof o.text === 'string') return o.text;
+      if (typeof o.output === 'string') return o.output;
+      if (typeof o.content === 'string') return o.content;
+      try { return JSON.stringify(o); } catch (e) { return String(o); }
+    }
+    return String(o);
+  }
+
   function attachToolOutput(msg, callId, output) {
-    var out = (output || '').substring(0, 200);
+    // Store the FULL output — truncation is the badge's job, not storage's.
+    var out = normalizeToolOutput(output);
     var found = -1;
     for (var i = msg.tools.length - 1; i >= 0; i--) {
       if (msg.tools[i].callId && msg.tools[i].callId === callId) { found = i; break; }
@@ -681,9 +677,10 @@
     if (found >= 0) {
       msg.tools[found].output = out;
       msg.tools[found].isComplete = true;
+      msg.tools[found].elapsed = Date.now() - (msg.tools[found].t0 || Date.now());
     } else if (callId) {
       msg.tools.push({
-        name: 'tool', icon: '[>]', args: '', output: out,
+        name: 'tool', icon: '\u26A1', args: '', output: out,
         isComplete: true, callId: callId
       });
     }
@@ -694,8 +691,9 @@
   // `hasEarlier` means "the server has older rows we haven't loaded". It is
   // driven by `historyHasMore` (from the pagination block on the messages
   // endpoint), NOT by turn count — the old turn-count version silently produced
-  // `false` in streaming mode, which is the default, so [Load earlier] never
-  // appeared and past the last maxTurns*2 messages a session was unviewable.
+  // `false` on the old completions path, which used to be the default, so
+  // [Load earlier] never appeared and past the last maxTurns*2 messages a
+  // session was unviewable.
   function updateHasEarlier() {
     state.hasEarlier = !!state.historyHasMore;
     updateLoadEarlierUI();
@@ -747,70 +745,12 @@
       });
   }
 
-  // Dispatch: streaming-mode sessions page through the history endpoint;
-  // responses-mode sessions page through the responses chain.
+  // Paging always goes through the history endpoint. The responses chain is a
+  // continuation mechanism, not a history source: `previous_response_id` only
+  // exists for turns this device sent, so chain-paging silently showed nothing
+  // for foreign sessions.
   function loadEarlier() {
-    var session = findSession(state.activeSession);
-    if (session && session.mode === 'responses' && state.earliestResponseId) {
-      return loadEarlierResponses();
-    }
     return loadEarlierHistory();
-  }
-
-  function loadEarlierResponses() {
-    if (state.loadingEarlier || !state.earliestResponseId) return;
-    state.loadingEarlier = true;
-    E['load-earlier-btn'].textContent = '[Loading...]';
-
-    fetch(state.serverUrl + '/v1/responses/' + state.earliestResponseId, { headers: headers(false) })
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function (data) {
-        var msgs = responseToMessages(data);
-        state.messages = msgs.concat(state.messages);
-        state.earliestResponseId = data.previous_response_id || null;
-        state.historyHasMore = !!state.earliestResponseId;
-        updateHasEarlier();
-        renderMessages();
-      })
-      .catch(function (err) {
-        E['load-earlier-btn'].textContent = '[ERR: ' + (err.message || 'Failed') + ']';
-        setTimeout(function () { E['load-earlier-btn'].textContent = '[Load earlier messages...]'; }, 2000);
-      })
-      .finally(function () {
-        state.loadingEarlier = false;
-        E['load-earlier-btn'].textContent = '[Load earlier messages...]';
-      });
-  }
-
-  /** Load the latest response for a session (responses mode) */
-  function loadLatestForSession(session) {
-    if (!session.lastResponseId) {
-      state.hasEarlier = false;
-      updateLoadEarlierUI();
-      return;
-    }
-    fetch(state.serverUrl + '/v1/responses/' + session.lastResponseId, { headers: headers(false) })
-      .then(function (r) {
-        if (!r.ok) throw new Error('HTTP ' + r.status);
-        return r.json();
-      })
-      .then(function (data) {
-        state.messages = responseToMessages(data);
-        state.latestResponseId = data.id;
-        state.earliestResponseId = data.previous_response_id || null;
-        // Responses mode pages via the response chain, not history offset.
-        state.historyHasMore = !!state.earliestResponseId;
-        updateHasEarlier();
-        renderMessages();
-      })
-      .catch(function (err) {
-        console.warn('[hermes] Could not load session history:', err.message);
-        state.hasEarlier = false;
-        updateLoadEarlierUI();
-      });
   }
 
   // ─── RESPONSE PARSING ────────────────────────────────────────────────────────
@@ -825,13 +765,13 @@
           try {
             var p = JSON.parse(item.arguments || '{}');
             var k = Object.keys(p);
-            if (k.length > 0) args = String(p[k[0]]).substring(0, 60);
-          } catch (e) { args = (item.arguments || '').substring(0, 60); }
-          msg.tools.push({ name: name, icon: '[*]', args: args, isComplete: true, callId: item.call_id || '' });
+            if (k.length > 0) args = String(p[k[0]]);
+          } catch (e) { args = (item.arguments || ''); }
+          msg.tools.push({ name: name, icon: '\u26A1', args: args, isComplete: true, callId: item.call_id || '' });
         } else if (item.type === 'function_call_output') {
           for (var j = msg.tools.length - 1; j >= 0; j--) {
             if (msg.tools[j].callId === item.call_id) {
-              msg.tools[j].output = (item.output || '').substring(0, 200);
+              msg.tools[j].output = normalizeToolOutput(item.output);
               break;
             }
           }
@@ -874,14 +814,6 @@
     return msgs;
   }
 
-  // ─── ENFORCE STREAMING TURN LIMIT ────────────────────────────────────────────
-  function enforceMaxTurns() {
-    var session = findSession(state.activeSession);
-    if (!session || session.mode !== 'streaming') return;
-    // Only visual trim — messages array remains full for localStorage
-    // (renderMessages handles this by slicing)
-  }
-
   // === RENDERING ===
   function renderStatus() {
     var icon = state.connected ? '\u25CF' : '\u25CB'; // ● / ○
@@ -892,13 +824,11 @@
   }
 
   function renderModeBadge() {
-    var m = state.mode;
-    if (E['mode-badge']) { E['mode-badge'].textContent = m === 'streaming' ? '\u25CE STREAM' : '\u2630 RESP'; }
-    if (E['chat-mode-badge']) { E['chat-mode-badge'].textContent = m === 'streaming' ? '\u25CE' : '\u2630'; }
+    // One transport now — say what it actually is instead of a mode toggle.
+    if (E['mode-badge']) { E['mode-badge'].textContent = '\u2630 SSE'; }
+    if (E['chat-mode-badge']) { E['chat-mode-badge'].textContent = '\u2630'; }
     if (E['mode-hint']) {
-      E['mode-hint'].textContent = m === 'streaming'
-        ? 'SSE stream. Local storage (last ' + state.maxTurns + ' turns shown).'
-        : 'Blocking. History paged from server. Minimal local storage.';
+      E['mode-hint'].textContent = 'Streams from /v1/responses. History paged from server.';
     }
   }
 
@@ -1055,6 +985,227 @@
     scrollToBottom();
   }
 
+  // === TOOL CARDS / REASONING BUILDERS ===
+
+  // Per-tool emoji, mirroring the server's tools/registry emoji fields. The
+  // LIVE streaming path gets a real glyph in `d.emoji`, but the /api/sessions
+  // history path carries only `tool_name` — without this map every historical
+  // badge would collapse to one generic bolt. Regenerate from the server with
+  // scripts/collect_tool_emojis.sh when tools are added.
+  var TOOL_EMOJI = {
+    "annotate_preview": "\uD83D\uDD16",
+    "apply_layout": "\uD83E\uDDF1",
+    "browser_back": "\u2B05",
+    "browser_cdp": "\uD83E\uDDEA",
+    "browser_click": "\uD83D\uDC46",
+    "browser_console": "\uD83D\uDDA5\uFE0F",
+    "browser_dialog": "\uD83D\uDCAC",
+    "browser_exec": "\uD83C\uDF10",
+    "browser_get_images": "\uD83D\uDDBC\uFE0F",
+    "browser_navigate": "\uD83C\uDF10",
+    "browser_press": "\u2328\uFE0F",
+    "browser_scroll": "\uD83D\uDCDC",
+    "browser_snapshot": "\uD83D\uDCF8",
+    "browser_type": "\u2328\uFE0F",
+    "browser_vision": "\uD83D\uDC41\uFE0F",
+    "clarify": "\u2753",
+    "close_terminal": "\uD83D\uDDA5\uFE0F",
+    "cronjob": "\u23F0",
+    "delegate_task": "\uD83D\uDD00",
+    "desktop_preview": "\uD83D\uDDBC\uFE0F",
+    "drive_preview": "\uD83D\uDDB1\uFE0F",
+    "execute_code": "\uD83D\uDC0D",
+    "focus_pane": "\uD83E\uDE9F",
+    "ha_call_service": "\uD83C\uDFE0",
+    "ha_get_state": "\uD83C\uDFE0",
+    "ha_list_entities": "\uD83C\uDFE0",
+    "ha_list_services": "\uD83C\uDFE0",
+    "image_generation": "\uD83C\uDFA8",
+    "kanban_attach": "\uD83D\uDCCE",
+    "kanban_attach_url": "\uD83D\uDCCE",
+    "kanban_attachments": "\uD83D\uDCCE",
+    "kanban_block": "\u23F8",
+    "kanban_comment": "\uD83D\uDCAC",
+    "kanban_complete": "\u2714",
+    "kanban_create": "\u2795",
+    "kanban_heartbeat": "\uD83D\uDC93",
+    "kanban_link": "\uD83D\uDD17",
+    "kanban_list": "\uD83D\uDCCB",
+    "kanban_request_changes": "\u23CE",
+    "kanban_request_review": "\uD83D\uDC40",
+    "kanban_show": "\uD83D\uDCCB",
+    "kanban_unblock": "\u23F5",
+    "memory": "\uD83E\uDDE0",
+    "patch": "\uD83D\uDD27",
+    "process": "\u2699\uFE0F",
+    "read_file": "\uD83D\uDCD6",
+    "react_to_message": "\uD83D\uDC9B",
+    "search_files": "\uD83D\uDD0E",
+    "terminal": "\uD83D\uDCBB",
+    "write_file": "\u270D\uFE0F"
+  };
+
+  // Resolve a tool's glyph: explicit emoji from the stream, else the map,
+  // else a lightning bolt so the badge is never blank.
+  function toolEmoji(name, explicit) {
+    if (explicit) return explicit;
+    if (name && TOOL_EMOJI[name]) return TOOL_EMOJI[name];
+    return '\u26A1';
+  }
+
+  function toolEmojiFor(tool) {
+    return toolEmoji(tool.name, tool.icon && tool.icon !== '\u26A1' ? tool.icon : null);
+  }
+
+  // Kindle has no emoji font: a raw glyph renders as tofu. Emit the prebuilt
+  // PNG instead. Assets are named U<5-hex-per-codepoint>.png and carry NO
+  // FE0F (VS16) variant — leaving the selector in produces a guaranteed 404,
+  // so variation selectors and ZWJ are stripped during the lookup.
+  function emojiImg(ch, cls) {
+    var img = document.createElement('img');
+    img.className = cls || 'emoji';
+    img.alt = ch || '';
+    var name = 'U';
+    for (var i = 0; i < ch.length; i++) {
+      var cp = ch.charCodeAt(i);
+      if (cp >= 0xD800 && cp <= 0xDBFF && i + 1 < ch.length) {
+        var lo = ch.charCodeAt(i + 1);
+        if (lo >= 0xDC00 && lo <= 0xDFFF) {
+          cp = ((cp - 0xD800) << 10) + (lo - 0xDC00) + 0x10000;
+          i++;
+        }
+      }
+      if (cp === 0xFE0F || cp === 0xFE0E || cp === 0x200D) continue;
+      name += ('00000' + cp.toString(16).toUpperCase()).slice(-5);
+    }
+    img.src = '/emoji/' + name + '.png';
+    // Unknown glyph: hide the spacer rather than show a broken-image box.
+    img.onerror = function () { this.style.visibility = 'hidden'; };
+    return img;
+  }
+
+  // Badge preview only — this is the SHORT form. The full args/output live in
+  // the expanded detail row, which is deliberately untruncated.
+  function truncatePreview(s, n) {
+    s = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+    if (s.length <= n) return s;
+    return s.slice(0, n - 1) + '\u2026';
+  }
+
+  // Full detail for one tool: emoji + name, complete args, elapsed, and the
+  // ENTIRE output (no substring cap — the point of expanding is to see it all).
+  function buildToolDetail(tool) {
+    var frag = document.createDocumentFragment();
+
+    var head = document.createElement('div');
+    head.className = 'tool-detail-head';
+    head.appendChild(emojiImg(toolEmojiFor(tool), 'emoji'));
+    var nm = document.createElement('span');
+    nm.textContent = ' ' + (tool.name || 'tool') +
+      (tool.isComplete ? '' : ' \u2014 RUNNING');
+    head.appendChild(nm);
+    frag.appendChild(head);
+
+    if (tool.args) {
+      var a = document.createElement('div');
+      a.className = 'tool-detail-args';
+      a.textContent = tool.args;
+      frag.appendChild(a);
+    }
+    if (tool.elapsed != null) {
+      var t = document.createElement('div');
+      t.className = 'tool-detail-time';
+      t.textContent = 'TIME ' + tool.elapsed + 'ms';
+      frag.appendChild(t);
+    }
+    var outTxt = normalizeToolOutput(tool.output);
+    if (outTxt) {
+      var o = document.createElement('pre');
+      o.className = 'tool-detail-out';
+      o.textContent = outTxt;
+      frag.appendChild(o);
+    }
+    return frag;
+  }
+
+  // Toggle the detail row for one badge. Tapping the same badge again hides it.
+  function toggleToolDetail(msg, idx, detailEl) {
+    if (!detailEl) return;
+    if (detailEl.style.display !== 'none' && detailEl._toolIdx === idx) {
+      detailEl.style.display = 'none';
+      detailEl._toolIdx = -1;
+      return;
+    }
+    var tool = msg.tools[idx];
+    if (!tool) return;
+    detailEl._toolIdx = idx;
+    detailEl.innerHTML = '';
+    detailEl.appendChild(buildToolDetail(tool));
+    detailEl.style.display = '';
+  }
+
+  // Badges are real <button>s (48px touch targets). Clicking toggles detail.
+  // Badge text is the SHORT preview; emoji renders as a PNG (no emoji font).
+  function makeToolBadge(tool, idx, msg, detailEl) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'badge' + (tool.isComplete ? ' badge--complete' : ' badge--active');
+    b.appendChild(emojiImg(toolEmojiFor(tool), 'emoji'));
+    var txt = document.createElement('span');
+    txt.textContent = ' ' + (tool.name || 'tool') +
+      (tool.args ? ' ' + truncatePreview(tool.args, 40) : '');
+    b.appendChild(txt);
+    b.setAttribute('aria-label', 'Tool details: ' + (tool.name || 'tool'));
+    b.onclick = function () { toggleToolDetail(msg, idx, detailEl); };
+    return b;
+  }
+
+  // Collapsed reasoning block. Button toggle (not <details> — flaky on old
+  // WebKit). Collapsed by default; raw text in <pre>, no markdown inside.
+  function buildReasoningEl(msg) {
+    var wrap = document.createElement('div');
+    wrap.className = 'reasoning';
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'btn btn--sm reasoning-toggle';
+    btn.textContent = '[THOUGHT]';
+    btn.setAttribute('aria-label', 'Toggle reasoning display');
+    var pre = document.createElement('pre');
+    pre.className = 'reasoning-text';
+    pre.style.display = 'none';
+    pre.textContent = msg.reasoning || '';
+    btn.onclick = function () {
+      var open = pre.style.display === 'none';
+      pre.style.display = open ? '' : 'none';
+      wrap.className = 'reasoning' + (open ? ' reasoning--open' : '');
+      btn.textContent = open ? '[HIDE]' : '[THOUGHT]';
+    };
+    wrap.appendChild(btn);
+    wrap.appendChild(pre);
+    return wrap;
+  }
+
+  // Badges live BELOW the prose (they are a footnote to the turn, not a
+  // header), and the row WRAPS instead of scrolling sideways — the old
+  // side-scroller hid every tool past the first couple on a 6" screen.
+  function buildToolsBlock(msg) {
+    var wrap = document.createElement('div');
+    wrap.className = 'tools-block';
+
+    var tc = document.createElement('div');
+    tc.className = 'tools-container';
+    var detail = document.createElement('div');
+    detail.className = 'tool-detail';
+    detail.style.display = 'none';
+    detail._toolIdx = -1;
+    for (var i = 0; i < msg.tools.length; i++) {
+      tc.appendChild(makeToolBadge(msg.tools[i], i, msg, detail));
+    }
+    wrap.appendChild(tc);
+    wrap.appendChild(detail);
+    return wrap;
+  }
+
   function buildMessageEl(msg) {
     var el = document.createElement('article');
     el.className = 'message message--' + msg.role;
@@ -1064,18 +1215,9 @@
     role.textContent = msg.role === 'user' ? 'You' : msg.role === 'assistant' ? 'Hermes' : 'Error';
     el.appendChild(role);
 
-    // Tool badges
-    if (msg.tools && msg.tools.length > 0) {
-      var tc = document.createElement('div');
-      tc.className = 'tools-container';
-      for (var i = 0; i < msg.tools.length; i++) {
-        var b = document.createElement('span');
-        b.className = 'badge' + (msg.tools[i].isComplete ? ' badge--complete' : ' badge--active');
-        b.textContent = (msg.tools[i].icon || '[*]') + ' ' + msg.tools[i].name;
-        tc.appendChild(b);
-      }
-      el.appendChild(tc);
-      setTimeout(function () { tc.scrollLeft = tc.scrollWidth; }, 0);
+    // Reasoning (collapsed) sits above the prose.
+    if (msg.reasoning) {
+      el.appendChild(buildReasoningEl(msg));
     }
 
     if (msg.content) {
@@ -1085,52 +1227,104 @@
       el.appendChild(c);
     }
 
+    // Per-turn token cost, straight from the server's usage envelope.
+    if (msg.role === 'assistant' && msg.usage) {
+      var u = document.createElement('div');
+      u.className = 'usage-line';
+      u.textContent = '▸ ' + formatTokens(msg.usage.input) + ' in · ' +
+        formatTokens(msg.usage.output) + ' out';
+      el.appendChild(u);
+    }
+
+    // Tool badges + shared detail row, LAST so they sit under the message.
+    if (msg.tools && msg.tools.length > 0) {
+      el.appendChild(buildToolsBlock(msg));
+    }
+
     // Apply Twemoji to convert emoji to images (Kindle-safe)
     applyTwemoji(el);
 
     return el;
   }
 
+  // Markdown re-render throttle for e-ink: marked.parse on every token chunk
+  // crushes Kindle's JIT-less CPU. Full render at most every 800ms; between
+  // renders show escaped plain text + cursor. Completion always re-renders
+  // fully via renderMessages().
+  var MD_RENDER_MS = 800;
+
   function updateLastMessage(msg) {
     var all = E['messages'].querySelectorAll('.message');
     var last = all[all.length - 1];
     if (!last) { renderMessages(); return; }
 
-    // Live-update tool badges
-    var tc = last.querySelector('.tools-container');
-    if (msg.tools && msg.tools.length > 0) {
-      if (!tc) {
-        tc = document.createElement('div');
-        tc.className = 'tools-container';
-        var roleEl = last.querySelector('.message-role');
-        if (roleEl && roleEl.nextSibling) {
-          last.insertBefore(tc, roleEl.nextSibling);
-        } else {
-          last.appendChild(tc);
-        }
+    // Live-update reasoning block
+    if (msg.reasoning) {
+      var rz = last.querySelector('.reasoning');
+      if (!rz) {
+        rz = buildReasoningEl(msg);
+        var c0 = last.querySelector('.message-content');
+        if (c0) last.insertBefore(rz, c0); else last.appendChild(rz);
+      } else {
+        var rpre = rz.querySelector('.reasoning-text');
+        if (rpre) rpre.textContent = msg.reasoning;
       }
-      tc.innerHTML = '';
-      for (var i = 0; i < msg.tools.length; i++) {
-        var b = document.createElement('span');
-        b.className = 'badge' + (msg.tools[i].isComplete ? ' badge--complete' : ' badge--active');
-        b.textContent = (msg.tools[i].icon || '[*]') + ' ' + msg.tools[i].name;
-        tc.appendChild(b);
-      }
-      tc.scrollLeft = tc.scrollWidth;
     }
 
-    // Live-update content with streaming cursor
+    // Live-update tool badges. The whole block is re-appended at the END so
+    // badges stay below the prose as it streams in; the detail row is a
+    // sibling of the badge row so its open state survives the rebuild.
+    var tc = last.querySelector('.tools-container');
+    if (msg.tools && msg.tools.length > 0) {
+      var detail = last.querySelector('.tool-detail');
+      if (!tc) {
+        var block = buildToolsBlock(msg);
+        last.appendChild(block);
+        tc = block.querySelector('.tools-container');
+        detail = block.querySelector('.tool-detail');
+      }
+      // Re-anchor below prose: content/usage may have been appended after us.
+      var tblock = tc.parentNode;
+      last.appendChild(tblock);
+      tc.innerHTML = '';
+      for (var i = 0; i < msg.tools.length; i++) {
+        tc.appendChild(makeToolBadge(msg.tools[i], i, msg, detail));
+      }
+      // Side-scrolling row: keep the newest badge in view as tools arrive.
+      tc.scrollLeft = tc.scrollWidth;
+      // Keep an open detail row in sync with the tool it shows.
+      if (detail && detail.style.display !== 'none' && detail._toolIdx >= 0) {
+        var dt = msg.tools[detail._toolIdx];
+        if (dt) {
+          detail.innerHTML = '';
+          detail.appendChild(buildToolDetail(dt));
+        } else { detail.style.display = 'none'; detail._toolIdx = -1; }
+      }
+    }
+
+    // Live-update content with streaming cursor (throttled markdown)
     var c = last.querySelector('.message-content');
     if (!c) {
       c = document.createElement('div');
       c.className = 'message-content';
       last.appendChild(c);
     }
-    c.innerHTML = renderMarkdown(msg.content) + '<span class="streaming-cursor">_</span>';
-    
+    var now = Date.now();
+    if (msg._lastMdRender && (now - msg._lastMdRender) < MD_RENDER_MS && msg.content) {
+      // Fast path: escaped text only, no marked.parse.
+      c.textContent = msg.content;
+      var cur = document.createElement('span');
+      cur.className = 'streaming-cursor';
+      cur.textContent = '_';
+      c.appendChild(cur);
+    } else {
+      msg._lastMdRender = now;
+      c.innerHTML = renderMarkdown(msg.content) + '<span class="streaming-cursor">_</span>';
+    }
+
     // Apply Twemoji to new content
     applyTwemoji(c);
-    
+
     scrollToBottom();
   }
 
@@ -1186,7 +1380,18 @@
   function updateInputState() {
     E['message-input'].disabled = state.sending;
     E['send-btn'].disabled = state.sending;
-    E['send-btn'].textContent = state.sending ? '[...]' : '[SEND]';
+    // While sending, [SEND] is replaced by [STOP] — aborting the in-flight
+    // request is the fastest way to stop burning tokens on a bad turn.
+    E['send-btn'].style.display = state.sending ? 'none' : '';
+    E['stop-btn'].style.display = state.sending ? '' : 'none';
+  }
+
+  // Abort the in-flight generation. The partial turn is kept (see the catch
+  // response handlers); nothing is converted to an error.
+  function stopGeneration() {
+    if (!state.sending || !state.activeCtrl) return;
+    state.userAborted = true;
+    try { state.activeCtrl.abort(); } catch (e) { /* already settled */ }
   }
 
   function updateLoadEarlierUI() {
@@ -1212,7 +1417,6 @@
       E['setting-key'].value = state.apiKey;
       E['setting-max-turns'].value = state.maxTurns;
       E['setting-dark-mode'].checked = !!state.dark;
-      E['setting-mode-' + state.mode].checked = true;
       renderModeBadge();
     }
   }
@@ -1223,19 +1427,11 @@
     state.maxTurns = parseInt(E['setting-max-turns'].value, 10) || DEFAULT_TURNS;
     state.dark = !!E['setting-dark-mode'].checked;
     
-    var m = 'streaming';
-    if (E['setting-mode-responses'].checked) m = 'responses';
-    state.mode = m;
-
-    // PROPAGATE TO ACTIVE SESSION:
-    // If we're already in a session, the user likely wants to change ITS mode too.
+    // Mode is no longer user-selectable; responses is the only transport.
+    state.mode = 'responses';
     if (state.activeSession) {
       var s = findSession(state.activeSession);
-      if (s) {
-        s.mode = m;
-        // If switching to responses, we don't need local messages.
-        // If switching to streaming, we'll keep what's on screen but new turns will be SSE.
-      }
+      if (s) s.mode = 'responses';
     }
 
     applyDarkMode();
@@ -1262,7 +1458,8 @@
     updateLoadEarlierUI();
 
     E['session-title'].textContent = id;
-    E['chat-mode-badge'].textContent = session.mode === 'streaming' ? '\u25CE' : '\u2630';
+    E['chat-mode-badge'].textContent = '\u2630';
+    renderUsageTotal();
     showView('chat');
     updateLoadEarlierUI();
 
@@ -1273,7 +1470,9 @@
     // session created anywhere else (Discord, CLI, cron) rendered EMPTY in
     // responses mode, because lastResponseId only exists for sessions this
     // device sent via RESP.
-    state.messages = session.mode === 'streaming' ? loadMessages(id) : [];
+    // History comes from the official endpoint (authoritative for sessions
+    // created anywhere — Discord, CLI, cron — not just this device).
+    state.messages = [];
     renderMessages();
     loadSessionHistory(id);
 
@@ -1325,17 +1524,17 @@
           try {
             var p = JSON.parse(fn.arguments || '{}');
             var k = Object.keys(p);
-            if (k.length > 0) args = String(p[k[0]]).substring(0, 60);
-          } catch (e) { args = (fn.arguments || '').substring(0, 60); }
+            if (k.length > 0) args = String(p[k[0]]);
+          } catch (e) { args = (fn.arguments || ''); }
           cur.tools.push({
             name: fn.name || row.tool_name || 'tool',
-            icon: '[*]', args: args, isComplete: true,
+            icon: '\u26A1', args: args, isComplete: true,
             callId: tcs[t].id || tcs[t].call_id || ''
           });
         }
 
       } else if (row.role === 'tool') {
-        var out = (row.content || '').substring(0, 200);
+        var out = (row.content || '');
         if (!cur) cur = { role: 'assistant', content: '', tools: [] };
         var attached = false;
         for (var j = 0; j < cur.tools.length; j++) {
@@ -1349,7 +1548,7 @@
           // Orphan output (the calling row fell outside our window) — keep it
           // visible with a synthesized badge rather than dropping it.
           cur.tools.push({
-            name: row.tool_name || 'tool', icon: '[>]', args: '',
+            name: row.tool_name || 'tool', icon: '\u26A1', args: '',
             output: out, isComplete: true, callId: row.tool_call_id || ''
           });
         }
@@ -1414,7 +1613,6 @@
           state.historyHasMore = rows.length >= pageSize;
           updateHasEarlier();
           renderMessages();
-          if (findSession(id) && findSession(id).mode === 'streaming') saveMessages(id, state.messages);
         }
         if (callback) callback(msgs);
       })
@@ -1494,16 +1692,6 @@
       if (ev.key === 'Enter') { ev.preventDefault(); tryRejoin(); }
     });
 
-    // Mode switch hints (Live update while toggling radios)
-    var updateHint = function () {
-      var m = E['setting-mode-responses'].checked ? 'responses' : 'streaming';
-      E['mode-hint'].textContent = m === 'streaming'
-        ? 'SSE stream. Local storage (last ' + (E['setting-max-turns'].value || state.maxTurns) + ' turns shown).'
-        : 'Blocking. History paged from server. Minimal local storage.';
-    };
-    E['setting-mode-streaming'].addEventListener('change', updateHint);
-    E['setting-mode-responses'].addEventListener('change', updateHint);
-    E['setting-max-turns'].addEventListener('input', updateHint);
 
     E['settings-toggle'].addEventListener('click', toggleSettings);
     E['settings-save'].addEventListener('click', saveSettings);
@@ -1531,6 +1719,9 @@
         autoGrow();
       }
     });
+
+    // Stop
+    E['stop-btn'].addEventListener('click', stopGeneration);
     E['message-input'].addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter' && !ev.shiftKey) { ev.preventDefault(); E['send-btn'].click(); }
     });
@@ -1539,9 +1730,10 @@
       setTimeout(function () { scrollIntoViewKindle(E['message-input']); }, 150);
     });
 
-    // Escape closes forms
+    // Escape: abort generation first, otherwise close forms
     document.addEventListener('keydown', function (ev) {
       if (ev.key === 'Escape') {
+        if (state.sending) { stopGeneration(); return; }
         if (E['new-session-form'].style.display !== 'none') {
           E['new-session-form'].style.display = 'none';
         } else if (E['settings-panel'].style.display !== 'none') {
@@ -1569,6 +1761,7 @@
 
     cacheDom();
     loadMeta();
+    state.usage = loadUsage();
 
     renderModeBadge();
     bindEvents();

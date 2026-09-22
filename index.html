@@ -90,17 +90,7 @@
         <input type="password" id="setting-key" class="input" placeholder="Bearer token" />
       </div>
       <div class="settings-field">
-        <span class="settings-label">Mode:</span>
-        <div class="radio-group">
-          <label class="radio-label">
-            <input type="radio" name="setting-mode" id="setting-mode-streaming" value="streaming" />
-            <span>Stream</span>
-          </label>
-          <label class="radio-label">
-            <input type="radio" name="setting-mode" id="setting-mode-responses" value="responses" />
-            <span>Responses</span>
-          </label>
-        </div>
+        <span class="settings-label">Transport:</span>
         <div class="mode-hint" id="mode-hint"></div>
       </div>
       <div class="settings-field">
@@ -124,6 +114,7 @@
       <button id="back-btn" class="btn btn--sm" aria-label="Go back">[&lt;- BACK]</button>
       <span id="session-title" class="thread-title"></span>
       <span id="chat-mode-badge" class="mode-badge mode-badge--sm"></span>
+      <span id="usage-total" class="mode-badge mode-badge--sm" aria-label="Session token usage"></span>
     </div>
 
     <!-- Load earlier messages (responses mode paging / streaming scroll) -->
@@ -151,6 +142,7 @@
         aria-label="Message input"
       ></textarea>
       <button id="send-btn" class="btn btn--primary btn--send" aria-label="Send message">[SEND]</button>
+      <button id="stop-btn" class="btn btn--send btn--stop" style="display:none" aria-label="Stop generation">[STOP]</button>
     </div>
   </section>
 

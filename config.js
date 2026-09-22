@@ -18,26 +18,13 @@ window.HERMES_CONFIG = {
   // Leave blank to be prompted in settings
   apiKey: '',
 
-  /**
-   * Chat mode:
-   *   'streaming'  — uses /v1/chat/completions SSE + localStorage for messages
-   *                  fast feedback, visible tool badges, limited history (last N turns)
-   *
-   *   'responses'  — uses /v1/responses (blocking) + server-side response chain
-   *                  full paged history, minimal localStorage (only lastResponseId)
-   *                  ideal for long-running conversations on low-memory devices
-   */
-  mode: 'streaming',
+  // Transport is fixed: /v1/responses streaming. Completions mode was removed.
 
   /**
    * Max turns to display in the chat view at once.
    *
-   * Streaming mode: last N user+assistant pairs are rendered; older ones exist
-   *   only in localStorage and are not re-rendered unless the user scrolls.
-   *
-   * Responses mode: when the current view has >= maxTurns pairs, the
-   *   [Load earlier] button appears so users can page in the prior responses
-   *   from the server (no client-side storage of content needed).
+   * The view renders the newest maxTurns pairs; when more exist server-side the
+   *   [Load earlier] button pages them in from /api/sessions/<id>/messages.
    */
   maxTurns: 8,
 
