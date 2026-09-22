@@ -124,6 +124,7 @@
       <button id="back-btn" class="btn btn--sm" aria-label="Go back">[&lt;- BACK]</button>
       <span id="session-title" class="thread-title"></span>
       <span id="chat-mode-badge" class="mode-badge mode-badge--sm"></span>
+      <span id="usage-total" class="mode-badge mode-badge--sm" aria-label="Session token usage"></span>
     </div>
 
     <!-- Load earlier messages (responses mode paging / streaming scroll) -->
@@ -151,6 +152,7 @@
         aria-label="Message input"
       ></textarea>
       <button id="send-btn" class="btn btn--primary btn--send" aria-label="Send message">[SEND]</button>
+      <button id="stop-btn" class="btn btn--send btn--stop" style="display:none" aria-label="Stop generation">[STOP]</button>
     </div>
   </section>
 

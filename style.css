@@ -799,3 +799,65 @@ tbody tr:last-child td {
   body { padding: var(--sp-4); }
   h1 { font-size: var(--fs-lg); }
 }
+
+/* --- MAKEOVER: STOP / USAGE / REASONING / TOOL DETAIL --- */
+
+/* STOP replaces SEND while generating: inverted high-contrast, same footprint */
+.btn--stop {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+  padding: 12px 20px;
+}
+.btn--stop:active {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+/* Session token total in the chat header (next to the mode badge) */
+#usage-total { color: var(--ink-faint); }
+
+/* Per-turn token cost under each assistant message */
+.usage-line {
+  font-size: var(--fs-xs);
+  color: var(--ink-faint);
+  margin-top: var(--sp-2);
+  letter-spacing: 0.05em;
+}
+
+/* Collapsed reasoning block: toggle button + raw <pre> (no markdown inside) */
+.reasoning { margin-bottom: var(--sp-4); }
+.reasoning-toggle { margin-bottom: var(--sp-2); }
+.reasoning-text {
+  font-family: var(--font);
+  font-size: var(--fs-sm);
+  color: var(--ink-mid);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  border-left: 4px solid var(--border-lt);
+  padding: var(--sp-2) var(--sp-3);
+  margin: 0 0 var(--sp-2) 0;
+  background: var(--paper-dim);
+}
+
+/* Expandable tool cards: badges are real buttons (48px touch targets) */
+.badge {
+  font-family: var(--font);
+  color: var(--ink);
+  cursor: pointer;
+  min-height: 48px;
+  appearance: none;
+  -webkit-appearance: none;
+}
+.tool-detail {
+  font-size: var(--fs-sm);
+  color: var(--ink-mid);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  border: 1px solid var(--border-lt);
+  background: var(--paper-dim);
+  padding: var(--sp-2) var(--sp-3);
+  margin-bottom: var(--sp-4);
+}
