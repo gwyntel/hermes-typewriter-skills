@@ -1,3 +1,5 @@
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/gwyntel/hermes-typewriter-skills)
+
 # Hermes Typewriter
 
 A minimalist, e-ink optimized chat interface for [hermes-agent](https://github.com/NousResearch/hermes-agent).
