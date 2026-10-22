@@ -67,7 +67,7 @@ npx skills add gwyntel/hermes-typewriter-skills --skill hermes-typewriter --agen
 npx skills add gwyntel/hermes-typewriter-skills --skill kindle-web-development --agent hermes-agent -g -y
 ```
 
-To install both, run both commands. The CLI installs them into the selected agent's global skills location. Alternatively, install the complete companion application repository's copies by following its README; do not mix both sources into the same skill paths.
+To install both, run both commands. The CLI installs them into the selected agent's global skills location. The companion application repository is the runnable app source, not an alternate CLI source for these companion skills. Do not install/link skills from that repository via CLI; use only this repository as the skills source.
 
 ### Use and update
 
