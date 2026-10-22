@@ -2,6 +2,8 @@
 name: hermes-typewriter
 description: Serve the Hermes Typewriter frontend, establish a Cloudflare tunnel for Kindle access, and automatically configure the hermes-agent backend API.
 version: 1.0.0
+author: gwyntel
+license: MutuaL-1.2
 metadata:
   hermes:
     tags: [typewriter, kindle, e-ink, deployment, tunnel]

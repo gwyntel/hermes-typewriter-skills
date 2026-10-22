@@ -2,6 +2,8 @@
 name: kindle-web-development
 description: Exhaustive web development guide for Amazon Kindle e-ink browsers — covering every known constraint, quirk, workaround, and best practice for CSS, JavaScript, browser APIs, e-ink rendering, and device-specific behavior.
 version: 2.0.0
+author: gwyntel
+license: MutuaL-1.2
 tags: [kindle, e-ink, browser, webkit, chromium, css, javascript, mobile, embedded]
 ---
 
