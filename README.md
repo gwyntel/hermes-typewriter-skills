@@ -22,17 +22,35 @@ This application is specifically designed to run on **Amazon Kindle** e-ink brow
 
 ## Quick Start
 
-### For Hermes agents
+### Default: install the skill from this repository
 
-Clone `https://github.com/gwyntel/hermes-typewriter-app`, install both skills below, then ask whether the user wants to run the **hermes-typewriter** workflow. That workflow configures the backend, starts the server, and establishes the Kindle chat frontend tunnel. Do not enable remote access or modify backend configuration without user authorization.
+There is one supported install path — the `hermes-typewriter` skill from this repository, via the Vercel Skills CLI:
 
-### Requirements
+```bash
+npx skills add gwyntel/hermes-typewriter-skills --skill hermes-typewriter --agent hermes-agent -g -y
+```
+
+Then ask your agent to run the **hermes-typewriter** workflow. That workflow clones or updates the application repository itself, configures the backend, starts the server, and establishes the Kindle chat frontend tunnel. Do not enable remote access or modify backend configuration without user authorization.
+
+See [Install with Vercel Skills CLI](#install-with-vercel-skills-cli) for the `kindle-web-development` skill, target selection, and updates.
+
+### Alternative: run an application copy by hand
+
+Only needed when you want to start the app yourself instead of through the skill, for example while working on the frontend. This repository's root already vendors the application source (kept identical to [hermes-typewriter-app](https://github.com/gwyntel/hermes-typewriter-app)), so you can either use a checkout of this repository or clone the app repository:
+
+```bash
+git clone https://github.com/gwyntel/hermes-typewriter-app
+```
+
+This alternative does not install anything; the skills still come from the path above. The steps below apply to it.
+
+#### Requirements
 
 - `hermes-agent` installed and running.
 - `python3` for the local proxy server.
 - `cloudflared` (optional, for remote Kindle access).
 
-### Configure backend
+#### Configure backend
 
 Ensure `~/.hermes/.env` has the API server enabled:
 
@@ -41,9 +59,9 @@ API_SERVER_ENABLED=true
 API_SERVER_KEY=your-secret-key
 ```
 
-### Start the application
+#### Start the application
 
-Run the serve script to start the local server and establish a tunnel. Use `--install` to have the script install missing dependencies (`cloudflared` or `ngrok`) via the system package manager (`brew` on macOS, `apt` on Linux).
+Run the serve script from the checkout to start the local server and establish a tunnel. Use `--install` to have the script install missing dependencies (`cloudflared` or `ngrok`) via the system package manager (`brew` on macOS, `apt` on Linux).
 
 ```bash
 ./serve.sh --install --port 8644
@@ -85,7 +103,7 @@ npx skills add gwyntel/hermes-typewriter-skills --skill hermes-typewriter --agen
 npx skills add gwyntel/hermes-typewriter-skills --skill kindle-web-development --agent hermes-agent -g -y
 ```
 
-This repository contains only skill definitions and their support files; the application itself is maintained in [hermes-typewriter-app](https://github.com/gwyntel/hermes-typewriter-app).
+This repository is the skills source *and* a vendored copy of the application: the root holds `app.js`, `style.css`, `server.py`, `config.js`, `index.html`, `serve.sh`, and `emoji/` (kept byte-identical to [hermes-typewriter-app](https://github.com/gwyntel/hermes-typewriter-app) `main`), with the skills under `skills/`. The Vercel CLI installs only the skill folders you name, so a skill install never pulls the vendored app source into your agent's skills directory. When the two copies diverge, the app repository is canonical for application code and this repository for skill definitions — the `hermes-typewriter` workflow clones the app repository, so treat the vendored copy here as a convenience for local work, not as the deployment source.
 
 ### Troubleshooting
 
