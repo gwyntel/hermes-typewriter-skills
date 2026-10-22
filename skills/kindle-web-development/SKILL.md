@@ -2327,9 +2327,11 @@ console.log(JSON.stringify(testFeatures(), null, 2));
 
 For apps that need to display conversation history from JSONL files:
 
-### Reading Hermes Session Files
+### Reading Hermes Session Files (Hermes-specific)
 
-Sessions are stored in `~/.hermes/sessions/` as JSONL:
+This subsection applies only when the product being developed explicitly consumes Hermes Agent session files. `~/.hermes/sessions/` is the default Hermes location, not a portable agent path; configurable Hermes installations may store sessions elsewhere. Other agents' conversation/session formats and paths differ and are not implied here.
+
+Sessions are stored in the configured Hermes session directory (commonly `~/.hermes/sessions/`) as JSONL:
 
 ```
 YYYYMMDD_HHMMSS_<id>.jsonl
