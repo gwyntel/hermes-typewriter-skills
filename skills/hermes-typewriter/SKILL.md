@@ -2,6 +2,8 @@
 name: hermes-typewriter
 description: Serve the Hermes Typewriter frontend, establish a Cloudflare tunnel for Kindle access, and automatically configure the hermes-agent backend API.
 version: 1.0.0
+author: gwyntel
+license: MutuaL-1.2
 metadata:
   hermes:
     tags: [typewriter, kindle, e-ink, deployment, tunnel]
@@ -9,7 +11,9 @@ metadata:
 
 # Hermes Typewriter: Remote Kindle Access
 
-Use this skill to deploy the typewriter frontend and ensure the hermes-agent backend is correctly configured for API access.
+This skill deploys the Hermes Typewriter product and configures a Hermes Agent backend; the product requirements are not tied to the agent executing these instructions. It can be followed by Hermes, Claude Code, Codex, or another agent with shell access. Use the agent's native way to inspect/edit its own configuration and start a supervised background process; do not assume Hermes-specific tools or filesystem locations are available.
+
+Use this skill to deploy the typewriter frontend and ensure the hermes-agent backend is correctly configured for API access. Ask before changing backend configuration, exposing a remote tunnel, installing packages, or starting a persistent service.
 
 ## Prerequisites
 
@@ -22,19 +26,12 @@ Follow these phases to get the typewriter live on a Kindle:
 
 ### Phase 0: Setup & Update
 
-1. **Clone or Update Repository**:
-   - Check if the `hermes-typewriter-app` directory exists.
+1. **Clone or Update the Application Repository**:
+   - `hermes-typewriter-app` is the runnable application source. Check whether its checkout exists.
    - If not: `git clone https://github.com/gwyntel/hermes-typewriter-app`
-   - If yes: `cd hermes-typewriter-app && git pull`
-2. **Install Skills**:
-   - Ensure the skill is linked to the agent's home:
-     `ln -sf $(pwd)/skills/hermes-typewriter ~/.hermes/skills/hermes-typewriter`
-     `ln -sf $(pwd)/skills/kindle-web-development ~/.hermes/skills/kindle-web-development`
-3. **Install Session Context Hook**:
-   - The hook injects recent session data into the typewriter frontend.
-   - Create hooks directory if needed: `mkdir -p ~/.hermes/hooks`
-   - Link the hook: `ln -sf $(pwd)/skills/hermes-typewriter/hooks/session-context ~/.hermes/hooks/session-context`
-   - The hook writes session data to `~/.hermes/session_context.json` on `agent:start` events
+   - If yes: update that checkout from its application source (for example, `git -C hermes-typewriter-app pull`).
+2. **Keep skill installation separate**: This workflow does not install or link skills from the application checkout. Preserve skills installed by the Vercel Skills CLI; their canonical source is `gwyntel/hermes-typewriter-skills`. Do not create nested links under an installed skill folder.
+3. **Session Context Hook (Hermes-specific, optional)**: Locate it relative to the installed `hermes-typewriter` skill directory at `hooks/session-context/`. Only Hermes Agent supports this repository's `agent:start` hook. If using Hermes and this integration is desired, consult current Hermes plugin/hook documentation and install through its supported hook mechanism. The hook writes to Hermes session context; it is not required to run the Typewriter application. Other agents should skip this step.
 
 ### Phase 1: Backend Configuration
 
@@ -42,16 +39,16 @@ Follow these phases to get the typewriter live on a Kindle:
    - Try `curl -s http://localhost:8642/health`.
    - If it returns `{"status": "ok"}`, the backend is ready. Skip configuration and proceed to Phase 2.
 
-2. **Retrieve API Key & Configuration**:
-   - If the health check fails, read the current configuration from `~/.hermes/.env`.
-   - Look for `API_SERVER_ENABLED` and `API_SERVER_KEY`.
+2. **Retrieve API Key & Configuration (Hermes backend only)**:
+   - If the health check fails, inspect the Hermes Agent installation's documented environment/config location. The default Hermes location is `~/.hermes/.env`; other deployments may configure a different path.
+   - Look for `API_SERVER_ENABLED` and `API_SERVER_KEY`. Never display the key. If the executing agent is not Hermes, the target Hermes backend still needs to be configured by its operator using Hermes' supported configuration workflow.
    - If `API_SERVER_ENABLED` is missing or `false`, inform the user you will enable it.
    - If `API_SERVER_KEY` exists, take note of it. If not, inform the user they need to set an API key.
 
 3. **Ensure Gateway is Running**:
-   - Check if the gateway is running (`lsof -ti :8642`).
-   - If not, start it in the background: `nohup hermes gateway > ~/.hermes/gateway.log 2>&1 &`
-   - Re-verify with `curl http://localhost:8642/health`.
+   - Check whether the configured Hermes API endpoint is reachable; the repository's default is `localhost:8642`.
+   - If unavailable, use the installation's supported gateway supervisor/service workflow. Do not assume a CLI command or logfile path; on standard Hermes installs the documented `hermes gateway` command may be available.
+   - Re-verify with `curl http://localhost:8642/health` (substitute the configured endpoint if different).
 
 ### Phase 2: Serve the Frontend
 

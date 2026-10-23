@@ -4,7 +4,7 @@
 
 A minimalist, e-ink optimized chat interface for [hermes-agent](https://github.com/NousResearch/hermes-agent).
 
-This application is specifically designed to run on **Amazon Kindle** e-ink browsers, adhering to strict constraints for older WebKit and newer Chromium-based firmware.
+This repository contains both a vendored copy of the Typewriter application and two companion Agent Skills. The application is designed for **Amazon Kindle** e-ink browsers, adhering to strict constraints for older WebKit and newer Chromium-based firmware.
 
 ## Key Features
 
@@ -22,61 +22,110 @@ This application is specifically designed to run on **Amazon Kindle** e-ink brow
 
 ## Quick Start
 
-### 🤖 For Hermes Agents (One-Click Setup)
-If you are an agent or human installing with an agent, follow this prompt to set up the typewriter:
-> "Clone the repository `https://github.com/gwyntel/hermes-typewriter-app`. Link both skills found in `skills/` to your home `~/.hermes/skills/` directory. Once installed, confirm your path and ask the user if they would like to proceed with the `hermes-typewriter` skill workflow to configure the backend, run the server, and establish the Kindle chat frontend tunnel over the public internet."
+### Default: install the skill from this repository
 
-### 1. Requirements
+There is one supported install path — the `hermes-typewriter` skill from this repository, via the Vercel Skills CLI:
+
+```bash
+npx skills add gwyntel/hermes-typewriter-skills --skill hermes-typewriter --agent hermes-agent -g -y
+```
+
+Then ask your agent to run the **hermes-typewriter** workflow. That workflow clones or updates the application repository itself, configures the backend, starts the server, and establishes the Kindle chat frontend tunnel. Do not enable remote access or modify backend configuration without user authorization.
+
+See [Install with Vercel Skills CLI](#install-with-vercel-skills-cli) for the `kindle-web-development` skill, target selection, and updates.
+
+### Alternative: run an application copy by hand
+
+Only needed when you want to start the app yourself instead of through the skill, for example while working on the frontend. This repository's root already vendors the application source (kept identical to [hermes-typewriter-app](https://github.com/gwyntel/hermes-typewriter-app)), so you can either use a checkout of this repository or clone the app repository:
+
+```bash
+git clone https://github.com/gwyntel/hermes-typewriter-app
+```
+
+This alternative does not install anything; the skills still come from the path above. The steps below apply to it.
+
+#### Requirements
+
 - `hermes-agent` installed and running.
 - `python3` for the local proxy server.
 - `cloudflared` (optional, for remote Kindle access).
 
-### 2. Configure Backend
-Ensure your `~/.hermes/.env` has the API server enabled:
-```bash
+#### Configure backend
+
+Ensure `~/.hermes/.env` has the API server enabled:
+
+```dotenv
 API_SERVER_ENABLED=true
 API_SERVER_KEY=your-secret-key
 ```
 
-### 3. Start the Application
-Run the serve script to start the local server and establish a tunnel. Use the `--install` flag to have the script automatically install any missing dependencies (`cloudflared` or `ngrok`) via your system's package manager (`brew` on macOS, `apt` on Linux).
+#### Start the application
+
+Run the serve script from the checkout to start the local server and establish a tunnel. Use `--install` to have the script install missing dependencies (`cloudflared` or `ngrok`) via the system package manager (`brew` on macOS, `apt` on Linux).
 
 ```bash
-# Auto-detect + Auto-install if missing
 ./serve.sh --install --port 8644
 ```
 
-The script will provide a `trycloudflare.com` or `ngrok.app` URL. Open this URL in your Kindle's browser.
+The script reports a `trycloudflare.com` or `ngrok.app` URL. Open it in your Kindle browser.
 
-## 🎨 Agent-Led Customization
+## Skills for Hermes Agent
 
-Since this project is designed for agents to maintain and evolve, you can use the following prompt to have an agent (like Antigravity or a Hermes Agent) customize the application's look and feel for you.
+This repository provides two Agent Skills-compatible skills:
 
-### 🪄 Customization Prompt
-Copy and paste this to your AI coding assistant:
+- **`hermes-typewriter`**: Deploys the typewriter frontend, configures the Hermes backend API, and manages a Kindle access tunnel.
+- **`kindle-web-development`**: Reference for developing frontend code under Kindle browser constraints.
 
-> "I want to customize the Hermes Typewriter interface. Please act as a senior frontend engineer and product designer to help me define a new aesthetic direction. 
-> 
+### Install with Vercel Skills CLI
+
+The canonical source is [gwyntel/hermes-typewriter-skills](https://github.com/gwyntel/hermes-typewriter-skills). Install either skill for Hermes Agent globally:
+
+```bash
+npx skills add gwyntel/hermes-typewriter-skills --skill hermes-typewriter --agent hermes-agent -g -y
+npx skills add gwyntel/hermes-typewriter-skills --skill kindle-web-development --agent hermes-agent -g -y
+```
+
+To install both, run both commands. The CLI installs them into the selected agent's global skills location. The companion application repository is the runnable app source, not an alternate CLI source for these companion skills. Do not install/link skills from that repository via CLI; use only this repository as the skills source.
+
+### Use and update
+
+After installation, ask your Hermes agent to use `hermes-typewriter` to deploy the app or `kindle-web-development` before editing its frontend. Updating skills installed with the Vercel CLI:
+
+```bash
+npx skills update hermes-typewriter -g -y
+npx skills update kindle-web-development -g -y
+```
+
+If your CLI version does not recognize a skill name, update from the source repository explicitly:
+
+```bash
+npx skills add gwyntel/hermes-typewriter-skills --skill hermes-typewriter --agent hermes-agent -g -y
+npx skills add gwyntel/hermes-typewriter-skills --skill kindle-web-development --agent hermes-agent -g -y
+```
+
+The skills are canonically maintained in this repository, which also contains a vendored copy of the application: the root holds `app.js`, `style.css`, `server.py`, `config.js`, `index.html`, `serve.sh`, and `emoji/` (kept byte-identical to [hermes-typewriter-app](https://github.com/gwyntel/hermes-typewriter-app) `main`), with the skills under `skills/`. The Vercel CLI installs only the skill folders you name, so a skill install never pulls the vendored app source into your agent's skills directory. When the two copies diverge, the app repository is canonical for application code and this repository for skill definitions — the `hermes-typewriter` workflow clones the app repository, so treat the vendored copy here as a convenience for local work, not as the deployment source.
+
+### Troubleshooting
+
+- **Skill not discovered:** Confirm the installed folder contains `SKILL.md` with YAML frontmatter containing `name` and `description`; reinstall with the exact `--skill` name shown above.
+- **Wrong target or path:** Pass `--agent hermes-agent` to select Hermes and `-g` for global installation. Check the CLI output for the actual destination and avoid installing duplicate copies through symlinks.
+- **Permission errors:** Use a writable user-level global location; avoid `sudo` with `npx skills`. If a local install is needed, omit `-g` and install in the project directory.
+- **Update fails:** Update the `skills` CLI (`npx skills --help` for supported commands), then rerun `npx skills add` using the canonical repository source.
+
+## Agent-Led Customization
+
+Since this project is designed for agents to maintain and evolve, you can use the following prompt to have an agent customize the application's look and feel.
+
+### Customization prompt
+
+> "I want to customize the Hermes Typewriter interface. Please act as a senior frontend engineer and product designer to help me define a new aesthetic direction.
+>
 > **Instructions:**
 > 1. **Analyze Constraints**: Read `skills/kindle-web-development/SKILL.md` to understand the strict e-ink browser limitations (no animations, no flexbox `gap`, ES2019 limit, high-contrast only, no transparency).
 > 2. **Propose Directions**: Suggest 3 distinct visual directions (e.g., **Brutally Minimal**, **Retro-Technical**, **Elegant Editorial**) that will render perfectly on a Kindle.
 > 3. **Implement Design**: Once I choose a direction, update `style.css` (UI design tokens), `app.js` (UI labels/logic), and `config.js` (runtime settings).
 > 4. **Refine Personality**: Update the `instructions` field in `config.js` to ensure the agent's tone matches the new visual persona.
 > 5. **Final Polish**: Ensure all touch targets are at least 48px, typography is highly legible, and the layout remains 'solid' (avoiding ghosting artifacts)."
-
-## Skills for Hermes Agent
-
-This repository includes two specialized skills for `hermes-agent`:
-
-1.  **`hermes-typewriter`**: Automates the deployment, backend configuration, and tunnel management for this application.
-2.  **`kindle-web-development`**: A comprehensive reference for anyone wanting to modify the frontend. It documents every known constraint of the Kindle browser (ES2019 ceiling, flexbox bugs, memory limits, etc.).
-
-### Installation
-To use these skills with your agent, link them to the hermes skill directory:
-```bash
-ln -s $(pwd)/skills/hermes-typewriter ~/.hermes/skills/hermes-typewriter
-ln -s $(pwd)/skills/kindle-web-development ~/.hermes/skills/kindle-web-development
-```
 
 ## Development
 
@@ -85,4 +134,4 @@ If you wish to modify the code:
 - **`style.css`**: Design tokens and e-ink layout (no `gap`, no animations).
 - **`server.py`**: Python HTTP proxy for auth and SSE flushing.
 
-Refer to the `kindle-web-development` skill before making any changes to ensure they remain compatible with e-ink hardware.
+Refer to the `kindle-web-development` skill before making frontend changes to ensure they remain compatible with e-ink hardware.
