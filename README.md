@@ -92,8 +92,8 @@ To install both, run both commands. The CLI installs them into the selected agen
 After installation, ask your Hermes agent to use `hermes-typewriter` to deploy the app or `kindle-web-development` before editing its frontend. Updating skills installed with the Vercel CLI:
 
 ```bash
-npx skills update hermes-typewriter
-npx skills update kindle-web-development
+npx skills update hermes-typewriter -g -y
+npx skills update kindle-web-development -g -y
 ```
 
 If your CLI version does not recognize a skill name, update from the source repository explicitly:

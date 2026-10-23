@@ -14,9 +14,9 @@ This license is not legal advice and does not create an attorney-client relation
 
 ## Credit
 
-**Name of this software:** (name)  
-**Project home:** (link)  
-**Original copyright holder(s):** (name(s))
+**Name of this software:** hermes-typewriter-skills
+**Project home:** https://github.com/gwyntel/hermes-typewriter-skills
+**Original copyright holder(s):** gwyntel
 
 ## Purpose
 
