@@ -4,7 +4,7 @@
 
 A minimalist, e-ink optimized chat interface for [hermes-agent](https://github.com/NousResearch/hermes-agent).
 
-This application is specifically designed to run on **Amazon Kindle** e-ink browsers, adhering to strict constraints for older WebKit and newer Chromium-based firmware.
+This repository contains both a vendored copy of the Typewriter application and two companion Agent Skills. The application is designed for **Amazon Kindle** e-ink browsers, adhering to strict constraints for older WebKit and newer Chromium-based firmware.
 
 ## Key Features
 
@@ -103,7 +103,7 @@ npx skills add gwyntel/hermes-typewriter-skills --skill hermes-typewriter --agen
 npx skills add gwyntel/hermes-typewriter-skills --skill kindle-web-development --agent hermes-agent -g -y
 ```
 
-This repository is the skills source *and* a vendored copy of the application: the root holds `app.js`, `style.css`, `server.py`, `config.js`, `index.html`, `serve.sh`, and `emoji/` (kept byte-identical to [hermes-typewriter-app](https://github.com/gwyntel/hermes-typewriter-app) `main`), with the skills under `skills/`. The Vercel CLI installs only the skill folders you name, so a skill install never pulls the vendored app source into your agent's skills directory. When the two copies diverge, the app repository is canonical for application code and this repository for skill definitions — the `hermes-typewriter` workflow clones the app repository, so treat the vendored copy here as a convenience for local work, not as the deployment source.
+The skills are canonically maintained in this repository, which also contains a vendored copy of the application: the root holds `app.js`, `style.css`, `server.py`, `config.js`, `index.html`, `serve.sh`, and `emoji/` (kept byte-identical to [hermes-typewriter-app](https://github.com/gwyntel/hermes-typewriter-app) `main`), with the skills under `skills/`. The Vercel CLI installs only the skill folders you name, so a skill install never pulls the vendored app source into your agent's skills directory. When the two copies diverge, the app repository is canonical for application code and this repository for skill definitions — the `hermes-typewriter` workflow clones the app repository, so treat the vendored copy here as a convenience for local work, not as the deployment source.
 
 ### Troubleshooting
 
