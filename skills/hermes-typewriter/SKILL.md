@@ -26,11 +26,11 @@ Follow these phases to get the typewriter live on a Kindle:
 
 ### Phase 0: Setup & Update
 
-1. **Clone or Update Repository**:
-   - Check if the `hermes-typewriter-app` directory exists.
+1. **Clone or Update the Application Repository**:
+   - `hermes-typewriter-app` is the runnable application source. Check whether its checkout exists.
    - If not: `git clone https://github.com/gwyntel/hermes-typewriter-app`
-   - If yes: `cd hermes-typewriter-app && git pull`
-2. **Audit companion skills**: Check whether the app repository contains related skill definitions, but do not link or install those companion skills through CLI commands. Install skill definitions only from `gwyntel/hermes-typewriter-skills`; the app repository is for application code.
+   - If yes: update that checkout from its application source (for example, `git -C hermes-typewriter-app pull`).
+2. **Keep skill installation separate**: This workflow does not install or link skills from the application checkout. Preserve skills installed by the Vercel Skills CLI; their canonical source is `gwyntel/hermes-typewriter-skills`. Do not create nested links under an installed skill folder.
 3. **Session Context Hook (Hermes-specific, optional)**: Locate it relative to the installed `hermes-typewriter` skill directory at `hooks/session-context/`. Only Hermes Agent supports this repository's `agent:start` hook. If using Hermes and this integration is desired, consult current Hermes plugin/hook documentation and install through its supported hook mechanism. The hook writes to Hermes session context; it is not required to run the Typewriter application. Other agents should skip this step.
 
 ### Phase 1: Backend Configuration
